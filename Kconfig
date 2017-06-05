@@ -1,0 +1,98 @@
+mainmenu "Project Configuration"
+
+config ARCH
+	string
+	option env="ARCH"
+	default ""
+
+config PPC
+	depends on ARCH = "powerpc"
+	bool
+	default y
+
+config ARM64
+	depends on ARCH = "arm64"
+	bool
+	default y
+
+config QORIQ
+	depends on PPC
+	bool "Freescale QorIQ platform"
+	default y
+	help
+	Freescale QorIQ platform
+
+config LAYERSCAPE
+	depends on ARM64
+	bool "Freescale Layerscape platform"
+	default y
+	help
+	Freescale Layerscape platform
+
+config DEBUG
+	bool "Print debug information"
+	default n
+	help
+	Print debug information
+
+config MTRACE
+	bool "Memory alloc/dealloc trace"
+	default n
+	help
+	Memory alloc/dealloc trace
+
+config MTOOL
+bool "Memory tool"
+	default y
+	help
+	Tool for R/W physical memory from user space
+
+menuconfig SIMPLEBITS
+	bool "SimpleBits"
+	default y
+	help
+	Tool for ethernet performance benchmark
+
+if SIMPLEBITS
+	config SB_CORE
+		bool "Core module"
+		default y
+		help
+		Simplebits core module for linux kernel
+
+	config SB_PLATFORM_TIME
+		depends on SB_CORE && (QORIQ || LAYERSCAPE)
+		bool "Use platform time"
+		default n
+		help
+		Use platform time instead of linux kernel time
+
+	menuconfig SB_DRIVER
+		depends on SB_CORE
+		bool "Ethernet driver"
+		default y
+		help
+		Device driver for simplebits
+
+	if SB_DRIVER
+		config SB_DPAA
+			depends on QORIQ || LAYERSCAPE
+			bool "DPAA ethernet driver"
+			default y
+			help
+			DPAA ethernet driver for simplebits
+
+		config TX_DRAIN_BP
+			depends on SB_DPAA
+			bool "Use tx drain bpool"
+			default n
+			help
+			Use tx drain bpool instead of tx confirm
+	endif
+
+	config SB_CLI
+		bool "Command line tool"
+		default y
+		help
+		Simplebits command line tool
+endif

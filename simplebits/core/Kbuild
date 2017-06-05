@@ -1,0 +1,23 @@
+#
+# Copyright (C) 2014
+#
+# Brick Yang <printfxxx@163.com>
+#
+# This program is free software. You can redistribute it and/or
+# modify it as you like.
+#
+
+##
+# File		Kbuild
+# Brief		Kernel module build makefile
+#
+
+src := $(src)/..
+
+obj-m += simplebits.o
+
+simplebits-objs = main.o netdev.o worker.o mtrace.o cmd.o proto.o time.o
+
+CFLAGS_proto.o += -I$(src)/../../common/
+
+#ccflags-y += -DRING_SANITY_CHECK

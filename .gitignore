@@ -1,0 +1,7 @@
+.build
+/opt/*
+/gen/*
+/.config
+/.config.old
+/tags
+/cscope.*

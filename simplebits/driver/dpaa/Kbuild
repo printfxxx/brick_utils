@@ -1,0 +1,15 @@
+src := $(src)/..
+
+NCSW_CFG = $(wildcard $(foreach n,fman sdk_fman,$(srctree)/drivers/net/ethernet/freescale/$(n)/ncsw_config.mk))
+
+include $(NCSW_CFG)
+
+obj-m := sb_dpaa.o
+
+sb_dpaa-objs := dpaa.o qman.o bman.o mtrace.o
+
+ccflags-y += -I$(srctree)/drivers/staging/fsl_qbman
+ccflags-$(CONFIG_FMAN_V3H) += -DFMAN_V3
+ccflags-$(CONFIG_FMAN_V3L) += -DFMAN_V3
+ccflags-$(CONFIG_FMAN_ARM) += -DFMAN_V3
+ccflags-$(CONFIG_TX_DRAIN_BP) += -DTX_DRAIN_BP

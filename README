@@ -1,0 +1,94 @@
+=== OVERVIEW ===
+* mtool
+A tool for R/W memory with specified physical address. This is a pure user space application run in linux.
+
+* simplebits
+A simple ethernet tool for generate traffic. Core module run in linux kernel space. Control it with client.
+These are key features of it:
+- Base on standard linux kernel.
+- Realtime measure Tx/Rx throughput.
+- Flow control support.
+- Load/Save tx frames from pcap file.
+- Optimized driver for NXP DPAA device.
+
+=== HOW TO BUILD ===
+1. Ensure ncurses or ncursesw already installed in your OS.
+
+2. Build kconfig frontend:
+$ make kconfig
+
+3. Run mconf to generate config file:
+$ make mconf
+
+4. Build project:
+$ make
+
+After build, you will find all binaries under "opt/"
+
+5. For cross-compile, you need export these enviroment variables:
+CROSS_COMPILE	- Cross compiler prefix
+SDK_SYSROOT	- Sysroot for target
+KDIR		- Directory that include linux kernel symbols
+ARCH		- ARCH for build linux kernel module
+
+=== HOW TO RUN ===
+* mtool
+Run "mtool -h" to see help.
+
+* simplebits
+1. Insert simplebits.ko in target linux OS.
+$ insmod simplebits.ko
+
+2. CLI connect with simplebits.ko with TCP/IP, config target IP and port:
+$ export SB_IP=<ip>:<port>
+
+3. View netdev list:
+$ sb_cli netdev
+
+4. Config tx skb pool size:
+$ sb_cli pool_sz <cpu> <dev> <size>
+
+5. Config tx queue length:
+$ sb_cli qlen <cpu> <dev> <length>
+
+6. Add skbs in pool:
+$ sb_cli add_skb <cpu> <dev> <size> <proto> ...
+
+7. Attach to the device:
+$ sb_cli attach <dev>
+
+8. Start traffic on the device:
+$ sb_cli start <dev>
+
+9. View statistics
+$ sb_cli stats
+
+Flow control. You can config bandwidth with these parameters:
+byte_mode	- 0 for base on number of packets, 1 for base on number of bytes.
+ps_limit	- Per-second limit.
+burst_sz	- Specify the size for each Tx burst. It will try keep same interval
+		  time for each burst.
+
+=== USE OPTIMIZED DRIVER ===
+Now only NXP DPAA device supported. For use optimized driver, you should configure
+these setting in dts:
+bp7: buffer-pool@7 {
+	compatible = "fsl,p4080-bpool", "fsl,bpool";
+	fsl,bpid = <7>;
+	fsl,bpool-ethernet-cfg = <0 0 0 2048 0 0xfeedabba>;	// bpool size must large than max length
+	fsl,bpool-thresholds = <0x0 0x0 0x0 0x0>;
+};
+
+ethernet@0 {
+	compatible = "fsl,dpa-ethernet-init";			// Set to init only mode
+	fsl,bman-buffer-pools = <&bp7>;				// Only one bpool is supported. Don't config multiple bpool
+								// Each ethernet port will exclusive use one bpool
+	fsl,qman-frame-queues-rx = <0x50 1 0x51 1 0x1000 16>;	// rx PCD queues support
+	fsl,qman-frame-queues-tx = <0x70 1 0x71 1>;
+};
+
+After insert optimized DPAA driver, you will see the netdev:
+$ insmod sb_dpaa.ko
+
+=== EXAMPLE ===
+You can see some examples under "simplebits/example/"
