@@ -82,8 +82,15 @@ if SIMPLEBITS
 			help
 			DPAA ethernet driver for simplebits
 
+		config SB_DPAA2
+			depends on LAYERSCAPE
+			bool "DPAA2 ethernet driver"
+			default y
+			help
+			DPAA2 ethernet driver for simplebits
+
 		config TX_DRAIN_BP
-			depends on SB_DPAA
+			depends on SB_DPAA || SB_DPAA2
 			bool "Use tx drain bpool"
 			default n
 			help
