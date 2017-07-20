@@ -27,7 +27,7 @@
 
 static char *netdev_filter;
 static LIST_HEAD(netdev_list);
-static DECLARE_RWSEM(netdev_list_lock);
+static DEFINE_MUTEX(netdev_list_lock);
 static struct task_struct *stats_th;
 
 module_param_named(devs, netdev_filter, charp, S_IRUGO);
@@ -56,12 +56,13 @@ static int netdev_receive(struct sk_buff *skb, struct net_device *ndev,
 	return 0;
 }
 
-netdev_t *netdev_find(const struct list_head *list,
-		      const struct net_device *find)
+static netdev_t *netdev_find(const struct net_device *find)
 {
 	netdev_t *netdev, *tmp;
 
-	list_for_each_entry_safe(netdev, tmp, list, node) {
+	BUG_ON(!mutex_is_locked(&netdev_list_lock));
+
+	list_for_each_entry_safe(netdev, tmp, &netdev_list, node) {
 		if ((netdev->ndev == find)) {
 			return netdev;
 		}
@@ -70,12 +71,13 @@ netdev_t *netdev_find(const struct list_head *list,
 	return NULL;
 }
 
-netdev_t *netdev_find_by_name(const struct list_head *list,
-			      const char *name)
+static netdev_t *netdev_find_by_name(const char *name)
 {
 	netdev_t *netdev, *tmp;
 
-	list_for_each_entry_safe(netdev, tmp, list, node) {
+	BUG_ON(!mutex_is_locked(&netdev_list_lock));
+
+	list_for_each_entry_safe(netdev, tmp, &netdev_list, node) {
 		if (!strcmp(netdev_name(netdev->ndev), name)) {
 			return netdev;
 		}
@@ -84,12 +86,13 @@ netdev_t *netdev_find_by_name(const struct list_head *list,
 	return NULL;
 }
 
-static int netdev_add(struct list_head *list, struct net_device *add,
-		      netdev_priv_ops_t *ops)
+static int netdev_add(struct net_device *add, netdev_priv_ops_t *ops)
 {
 	int rc;
 	netdev_t *netdev;
 	worker_op_t op;
+
+	BUG_ON(!mutex_is_locked(&netdev_list_lock));
 
 	if (!(netdev = kzalloc(sizeof(*netdev), GFP_KERNEL))
 	||  !(netdev->pcpu = alloc_percpu(netdev_pcpu_t))) {
@@ -100,7 +103,7 @@ static int netdev_add(struct list_head *list, struct net_device *add,
 
 	netdev->ndev = add;
 	netdev->priv_ops = ops;
-	init_rwsem(&netdev->lock);
+	mutex_init(&netdev->lock);
 	seqcount_init(&netdev->stats_seq);
 
 	op.opcode = WORKER_OP_BIND;
@@ -111,7 +114,7 @@ static int netdev_add(struct list_head *list, struct net_device *add,
 	}
 
 	INIT_LIST_HEAD(&netdev->node);
-	list_add_tail(&netdev->node, list);
+	list_add_tail(&netdev->node, &netdev_list);
 
 	return 0;
 err:
@@ -147,10 +150,11 @@ static int netdev_attach(netdev_t *netdev)
 
 	ASSERT_RTNL();
 
-	down_write(&netdev->lock);
+	mutex_lock(&netdev->lock);
 	if (netdev->attach) {
 		netdev_err(netdev->ndev, "already attached\n");
 		rc = -EBUSY;
+		mutex_unlock(&netdev->lock);
 		goto err;
 	}
 
@@ -176,6 +180,7 @@ static int netdev_attach(netdev_t *netdev)
 		if (!(flags & IFF_PROMISC)) {
 			if ((rc = dev_change_flags(ndev, flags | IFF_PROMISC))) {
 				netdev_err(ndev, "failed to enable promiscuous mode\n");
+				mutex_unlock(&netdev->lock);
 				goto err_change;
 			}
 			netdev->ndev_ch_flags |= NDEV_CH_F_PROMISC;
@@ -185,7 +190,8 @@ static int netdev_attach(netdev_t *netdev)
 	}
 
 	netdev->attach = true;
-	goto ok;
+	mutex_unlock(&netdev->lock);
+	return 0;
 
 err_change:
 	dev_remove_pack(&netdev->pt);
@@ -194,11 +200,7 @@ err_change:
 		netdev_features_change(ndev);
 	}
 err:
-	up_write(&netdev->lock);
 	return rc;
-ok:
-	up_write(&netdev->lock);
-	return 0;
 }
 
 static void netdev_detach(netdev_t *netdev)
@@ -207,7 +209,7 @@ static void netdev_detach(netdev_t *netdev)
 
 	ASSERT_RTNL();
 
-	down_write(&netdev->lock);
+	mutex_lock(&netdev->lock);
 	if (!netdev->attach) {
 		goto end;
 	}
@@ -229,7 +231,7 @@ static void netdev_detach(netdev_t *netdev)
 
 	netdev->attach = false;
 end:
-	up_write(&netdev->lock);
+	mutex_unlock(&netdev->lock);
 }
 
 static int netdev_clear(netdev_t *netdev)
@@ -237,7 +239,7 @@ static int netdev_clear(netdev_t *netdev)
 	int rc;
 	worker_op_t op;
 
-	down_write(&netdev->lock);
+	mutex_lock(&netdev->lock);
 
 	op.opcode = WORKER_OP_CLEAR;
 	cpumask_copy(&op.cpumask, cpu_online_mask);
@@ -251,37 +253,9 @@ static int netdev_clear(netdev_t *netdev)
 	netdev->rx_pps_rt = netdev->rx_Bps_rt = netdev->rx_bps_rt = 0;
 	netdev->time_start = netdev->time_stop = netdev->time_prev = ktime_get();
 
-	up_write(&netdev->lock);
+	mutex_unlock(&netdev->lock);
 
 	return rc;
-}
-
-struct list_head *netdev_list_acquire_read(void)
-{
-	down_read(&netdev_list_lock);
-
-	return &netdev_list;
-}
-
-void netdev_list_release_read(const struct list_head *list)
-{
-	if (list == &netdev_list) {
-		up_read(&netdev_list_lock);
-	}
-}
-
-struct list_head *netdev_list_acquire_write(void)
-{
-	down_write(&netdev_list_lock);
-
-	return &netdev_list;
-}
-
-void netdev_list_release_write(const struct list_head *list)
-{
-	if (list == &netdev_list) {
-		up_write(&netdev_list_lock);
-	}
 }
 
 static int __netdev_notifier(struct net_device *ndev, unsigned long event,
@@ -291,7 +265,6 @@ static int __netdev_notifier(struct net_device *ndev, unsigned long event,
 	netdev_t *netdev;
 	worker_op_t op;
 	unsigned long priv_flags;
-	struct list_head *list;
 
 #ifdef NET_DEVICE_EXTENDED_SIZE
 	priv_flags = netdev_extended(ndev)->ext_priv_flags;
@@ -307,39 +280,39 @@ static int __netdev_notifier(struct net_device *ndev, unsigned long event,
 	switch (event) {
 	case NETDEV_UP:
 		rc = 0;
-		list = netdev_list_acquire_write();
+		mutex_lock(&netdev_list_lock);
 		if (netdev_in_filter(netdev_name(ndev))
-		&&  !(netdev = netdev_find(list, ndev))) {
-			rc = netdev_add(list, ndev, arg);
+		&&  !(netdev = netdev_find(ndev))) {
+			rc = netdev_add(ndev, arg);
 		}
-		netdev_list_release_write(list);
+		mutex_unlock(&netdev_list_lock);
 		if (rc) {
 			goto err;
 		}
 		break;
 
 	case NETDEV_GOING_DOWN:
-		list = netdev_list_acquire_write();
+		mutex_lock(&netdev_list_lock);
 		if (netdev_in_filter(netdev_name(ndev))
-		&&  (netdev = netdev_find(list, ndev))) {
-			down_write(&netdev->lock);
+		&&  (netdev = netdev_find(ndev))) {
+			mutex_lock(&netdev->lock);
 			op.opcode = WORKER_OP_STOP | WORKER_OP_F_PARALLEL;
 			cpumask_copy(&op.cpumask, cpu_online_mask);
 			op.args[0] = netdev;
 			worker_op_post(&op);
-			up_write(&netdev->lock);
+			mutex_unlock(&netdev->lock);
 		}
-		netdev_list_release_write(list);
+		mutex_unlock(&netdev_list_lock);
 		break;
 
 	case NETDEV_DOWN:
-		list = netdev_list_acquire_write();
+		mutex_lock(&netdev_list_lock);
 		if (netdev_in_filter(netdev_name(ndev))
-		&&  (netdev = netdev_find(list, ndev))) {
+		&&  (netdev = netdev_find(ndev))) {
 			netdev_detach(netdev);
 			netdev_del(netdev);
 		}
-		netdev_list_release_write(list);
+		mutex_unlock(&netdev_list_lock);
 		break;
 
 	default:
@@ -375,45 +348,43 @@ static int netdev_cmd_netdev(proto_handle_t *handle, proto_rxd_t *rxd, unsigned 
 	int rc;
 	netdev_t *netdev, *tmp;
 	const char *arg_netdev;
-	const struct list_head *list;
 
 	rxd->len = rxd->hdr.length;
 	arg_netdev = proto_get_str(&rxd->buf, &rxd->len);
 
-	list = netdev_list_acquire_read();
+	mutex_lock(&netdev_list_lock);
 
 	if (!arg_netdev) {
-		list_for_each_entry_safe(netdev, tmp, list, node) {
-			down_read(&netdev->lock);
+		list_for_each_entry_safe(netdev, tmp, &netdev_list, node) {
+			mutex_lock(&netdev->lock);
 			cmd_pr_info(handle, "%s%s%s\n", netdev_name(netdev->ndev),
 				    netdev->priv_ops ? " [priv]": "", netdev->attach ? " [attach]" : "");
-			up_read(&netdev->lock);
+			mutex_unlock(&netdev->lock);
 		}
 	} else {
-		if (!(netdev = netdev_find_by_name(list, arg_netdev))) {
+		if (!(netdev = netdev_find_by_name(arg_netdev))) {
 			cmd_pr_err(handle, "ERR: netdev \"%s\" not found\n", arg_netdev);
 			rc = -ENODEV;
+			mutex_unlock(&netdev_list_lock);
 			goto err;
 		}
 		rc = 0;
-		down_read(&netdev->lock);
+		mutex_lock(&netdev->lock);
 		if (netdev->attach) {
 			cmd_pr_info(handle, "txq_nr=%d\n", netdev->ndev->real_num_tx_queues);
 		} else {
 			cmd_pr_err(handle, "ERR: netdev \"%s\" not attached\n", arg_netdev);
 			rc = -ENODEV;
-		}
-		up_read(&netdev->lock);
-		if (rc) {
+			mutex_unlock(&netdev->lock);
+			mutex_unlock(&netdev_list_lock);
 			goto err;
 		}
+		mutex_unlock(&netdev->lock);
 	}
 
-	rc = 0;
-	goto ok;
+	mutex_unlock(&netdev_list_lock);
+	return 0;
 err:
-ok:
-	netdev_list_release_read(list);
 	return rc;
 }
 
@@ -423,7 +394,6 @@ static int netdev_cmd_start(proto_handle_t *handle, proto_rxd_t *rxd, unsigned l
 	netdev_t *netdev;
 	const char *arg_netdev;
 	worker_op_t op;
-	struct list_head *list = NULL;
 
 	rxd->len = rxd->hdr.length;
 	if (!(arg_netdev = proto_get_str(&rxd->buf, &rxd->len))) {
@@ -431,54 +401,55 @@ static int netdev_cmd_start(proto_handle_t *handle, proto_rxd_t *rxd, unsigned l
 		goto err;
 	}
 
-	list = netdev_list_acquire_read();
+	mutex_lock(&netdev_list_lock);
 
-	if (!(netdev = netdev_find_by_name(list, arg_netdev))) {
+	if (!(netdev = netdev_find_by_name(arg_netdev))) {
 		cmd_pr_err(handle, "ERR: netdev \"%s\" not found\n", arg_netdev);
 		rc = -ENODEV;
-		goto err_find;
+		mutex_unlock(&netdev_list_lock);
+		goto err;
 	}
 
-	down_write(&netdev->lock);
+	mutex_lock(&netdev->lock);
 
 	if (!netdev->attach) {
 		cmd_pr_err(handle, "ERR: netdev \"%s\" not attached\n", arg_netdev);
 		rc = -ENODEV;
-		goto err_check;
+		mutex_unlock(&netdev->lock);
+		mutex_unlock(&netdev_list_lock);
+		goto err;
 	}
 
 	if (netdev->start) {
 		rc = -EBUSY;
-		goto err_check;
+		mutex_unlock(&netdev->lock);
+		mutex_unlock(&netdev_list_lock);
+		goto err;
 	}
 
 	op.opcode = WORKER_OP_START | WORKER_OP_F_PARALLEL;
 	get_worker_cpumask(&op.cpumask);
 	op.args[0] = netdev;
 	if ((rc = worker_op_post(&op))) {
+		mutex_unlock(&netdev->lock);
+		mutex_unlock(&netdev_list_lock);
 		goto err_post;
 	}
 
 	netdev->time_start = ktime_get();
 	netdev->start = true;
 
-	goto ok;
+	mutex_unlock(&netdev->lock);
+	mutex_unlock(&netdev_list_lock);
+	return 0;
 
 err_post:
 	op.opcode = WORKER_OP_STOP | WORKER_OP_F_PARALLEL;
 	get_worker_cpumask(&op.cpumask);
 	op.args[0] = netdev;
 	worker_op_post(&op);
-err_check:
-	up_write(&netdev->lock);
-err_find:
-	netdev_list_release_read(list);
 err:
 	return rc;
-ok:
-	up_write(&netdev->lock);
-	netdev_list_release_read(list);
-	return 0;
 }
 
 static int netdev_cmd_stop(proto_handle_t *handle, proto_rxd_t *rxd, unsigned long param)
@@ -487,7 +458,6 @@ static int netdev_cmd_stop(proto_handle_t *handle, proto_rxd_t *rxd, unsigned lo
 	netdev_t *netdev;
 	const char *arg_netdev;
 	worker_op_t op;
-	struct list_head *list = NULL;
 
 	rxd->len = rxd->hdr.length;
 	if (!(arg_netdev = proto_get_str(&rxd->buf, &rxd->len))) {
@@ -495,18 +465,18 @@ static int netdev_cmd_stop(proto_handle_t *handle, proto_rxd_t *rxd, unsigned lo
 		goto err;
 	}
 
-	list = netdev_list_acquire_read();
+	mutex_lock(&netdev_list_lock);
 
-	if (!(netdev = netdev_find_by_name(list, arg_netdev))) {
+	if (!(netdev = netdev_find_by_name(arg_netdev))) {
 		cmd_pr_err(handle, "ERR: netdev \"%s\" not found\n", arg_netdev);
 		rc = -ENODEV;
-		goto err_find;
+		mutex_unlock(&netdev_list_lock);
+		goto err;
 	}
 
-	down_write(&netdev->lock);
+	mutex_lock(&netdev->lock);
 
 	if (!netdev->start) {
-		rc = 0;
 		goto ok;
 	}
 
@@ -514,20 +484,17 @@ static int netdev_cmd_stop(proto_handle_t *handle, proto_rxd_t *rxd, unsigned lo
 	get_worker_cpumask(&op.cpumask);
 	op.args[0] = netdev;
 	if ((rc = worker_op_post(&op))) {
-		goto err_post;
+		mutex_unlock(&netdev->lock);
+		mutex_unlock(&netdev_list_lock);
+		goto err;
 	}
 
 	netdev->time_stop = ktime_get();
 	netdev->start = false;
 ok:
-	up_write(&netdev->lock);
-	netdev_list_release_read(list);
+	mutex_unlock(&netdev->lock);
+	mutex_unlock(&netdev_list_lock);
 	return 0;
-
-err_post:
-	up_write(&netdev->lock);
-err_find:
-	netdev_list_release_read(list);
 err:
 	return rc;
 }
@@ -537,7 +504,6 @@ static int netdev_cmd_clear(proto_handle_t *handle, proto_rxd_t *rxd, unsigned l
 	int rc;
 	netdev_t *netdev;
 	const char *arg_netdev;
-	struct list_head *list = NULL;
 
 	rxd->len = rxd->hdr.length;
 	if (!(arg_netdev = proto_get_str(&rxd->buf, &rxd->len))) {
@@ -545,27 +511,29 @@ static int netdev_cmd_clear(proto_handle_t *handle, proto_rxd_t *rxd, unsigned l
 		goto err;
 	}
 
-	list = netdev_list_acquire_read();
+	mutex_lock(&netdev_list_lock);
 
-	if (!(netdev = netdev_find_by_name(list, arg_netdev))) {
+	if (!(netdev = netdev_find_by_name(arg_netdev))) {
 		cmd_pr_err(handle, "ERR: netdev \"%s\" not found\n", arg_netdev);
 		rc = -ENODEV;
+		mutex_unlock(&netdev_list_lock);
 		goto err;
 	}
 	if (!netdev->attach) {
 		cmd_pr_err(handle, "ERR: netdev \"%s\" not attached\n", arg_netdev);
 		rc = -ENODEV;
+		mutex_unlock(&netdev_list_lock);
 		goto err;
 	}
 
 	if ((rc = netdev_clear(netdev))) {
+		mutex_unlock(&netdev_list_lock);
 		goto err;
 	}
 
-	goto ok;
+	mutex_unlock(&netdev_list_lock);
+	return 0;
 err:
-ok:
-	netdev_list_release_read(list);
 	return rc;
 }
 
@@ -702,19 +670,18 @@ static void netdev_cmd_stats_single(proto_handle_t *handle, netdev_t *netdev)
 static int netdev_cmd_stats(proto_handle_t *handle, proto_rxd_t *rxd, unsigned long param)
 {
 	netdev_t *netdev, *tmp;
-	const struct list_head *list = NULL;
 
-	list = netdev_list_acquire_read();
+	mutex_lock(&netdev_list_lock);
 
-	list_for_each_entry_safe(netdev, tmp, list, node) {
-		down_read(&netdev->lock);
+	list_for_each_entry_safe(netdev, tmp, &netdev_list, node) {
+		mutex_lock(&netdev->lock);
 		if (netdev->attach) {
 			netdev_cmd_stats_single(handle, netdev);
 		}
-		up_read(&netdev->lock);
+		mutex_unlock(&netdev->lock);
 	}
 
-	netdev_list_release_read(list);
+	mutex_unlock(&netdev_list_lock);
 
 	return 0;
 }
@@ -724,7 +691,6 @@ static int netdev_cmd_attach(proto_handle_t *handle, proto_rxd_t *rxd, unsigned 
 	int rc;
 	netdev_t *netdev;
 	const char *arg_netdev;
-	struct list_head *list = NULL;
 
 	rxd->len = rxd->hdr.length;
 	if (!(arg_netdev = proto_get_str(&rxd->buf, &rxd->len))) {
@@ -732,9 +698,11 @@ static int netdev_cmd_attach(proto_handle_t *handle, proto_rxd_t *rxd, unsigned 
 		goto err;
 	}
 
-	list = netdev_list_acquire_read();
-	if (!(netdev = netdev_find_by_name(list, arg_netdev))) {
+	mutex_lock(&netdev_list_lock);
+
+	if (!(netdev = netdev_find_by_name(arg_netdev))) {
 		rc = -ENODEV;
+		mutex_unlock(&netdev_list_lock);
 		goto err;
 	}
 
@@ -743,13 +711,13 @@ static int netdev_cmd_attach(proto_handle_t *handle, proto_rxd_t *rxd, unsigned 
 	rtnl_unlock();
 
 	if (rc || (rc = netdev_clear(netdev))) {
+		mutex_unlock(&netdev_list_lock);
 		goto err;
 	}
 
-	goto ok;
+	mutex_unlock(&netdev_list_lock);
+	return 0;
 err:
-ok:
-	netdev_list_release_read(list);
 	return rc;
 }
 
@@ -758,7 +726,6 @@ static int netdev_cmd_detach(proto_handle_t *handle, proto_rxd_t *rxd, unsigned 
 	int rc;
 	netdev_t *netdev;
 	const char *arg_netdev;
-	struct list_head *list = NULL;
 	proto_rxd_t _rxd;
 
 	_rxd = *rxd;
@@ -772,9 +739,10 @@ static int netdev_cmd_detach(proto_handle_t *handle, proto_rxd_t *rxd, unsigned 
 		goto err;
 	}
 
-	list = netdev_list_acquire_read();
-	if (!(netdev = netdev_find_by_name(list, arg_netdev))) {
+	mutex_lock(&netdev_list_lock);
+	if (!(netdev = netdev_find_by_name(arg_netdev))) {
 		rc = -ENODEV;
+		mutex_unlock(&netdev_list_lock);
 		goto err;
 	}
 
@@ -782,11 +750,9 @@ static int netdev_cmd_detach(proto_handle_t *handle, proto_rxd_t *rxd, unsigned 
 	netdev_detach(netdev);
 	rtnl_unlock();
 
-	rc = 0;
-	goto ok;
+	mutex_unlock(&netdev_list_lock);
+	return 0;
 err:
-ok:
-	netdev_list_release_read(list);
 	return rc;
 }
 
@@ -889,7 +855,6 @@ static int netdev_stats_fn(void *arg)
 	int64_t ns;
 	ktime_t prev, now;
 	netdev_t *netdev, *tmp;
-	struct list_head *list;
 
 	while (!kthread_should_stop()) {
 		if (unlikely(need_resched())) {
@@ -897,17 +862,17 @@ static int netdev_stats_fn(void *arg)
 		}
 		prev = ktime_get();
 		msleep_interruptible(MSEC_PER_SEC);
-		list = netdev_list_acquire_read();
-		list_for_each_entry_safe(netdev, tmp, list, node) {
-			down_read(&netdev->lock);
+		mutex_lock(&netdev_list_lock);
+		list_for_each_entry_safe(netdev, tmp, &netdev_list, node) {
+			mutex_lock(&netdev->lock);
 			if (netdev->attach) {
 				now = ktime_get();
 				ns = ktime_to_ns(ktime_sub(now, prev));
 				netdev_update_stats(netdev, ns);
 			}
-			up_read(&netdev->lock);
+			mutex_unlock(&netdev->lock);
 		}
-		netdev_list_release_read(list);
+		mutex_unlock(&netdev_list_lock);
 	}
 
 	return 0;
@@ -917,7 +882,6 @@ int __init netdev_add_all(void)
 {
 	int rc;
 	netdev_t *netdev, *tmp;
-	struct list_head *list = NULL;
 
 	if ((rc = register_netdevice_notifier(&netdev_notifier_block))) {
 		pr_err("Failed to register netdevice notifier\n");
@@ -941,14 +905,14 @@ int __init netdev_add_all(void)
 	return 0;
 err:
 	rtnl_lock();
-	list = netdev_list_acquire_write();
+	mutex_lock(&netdev_list_lock);
 
-	list_for_each_entry_safe(netdev, tmp, list, node) {
+	list_for_each_entry_safe(netdev, tmp, &netdev_list, node) {
 		netdev_detach(netdev);
 		netdev_del(netdev);
 	}
 
-	netdev_list_release_write(list);
+	mutex_unlock(&netdev_list_lock);
 	rtnl_unlock();
 	return rc;
 }
@@ -956,7 +920,6 @@ err:
 void netdev_del_all(void)
 {
 	netdev_t *netdev, *tmp;
-	struct list_head *list;
 
 	set_tsk_thread_flag(stats_th, TIF_SIGPENDING);
 	kthread_stop(stats_th);
@@ -964,15 +927,31 @@ void netdev_del_all(void)
 	unregister_netdevice_notifier(&netdev_notifier_block);
 
 	rtnl_lock();
-	list = netdev_list_acquire_write();
+	mutex_lock(&netdev_list_lock);
 
-	list_for_each_entry_safe(netdev, tmp, list, node) {
+	list_for_each_entry_safe(netdev, tmp, &netdev_list, node) {
 		netdev_detach(netdev);
 		netdev_del(netdev);
 	}
 
-	netdev_list_release_write(list);
+	mutex_unlock(&netdev_list_lock);
 	rtnl_unlock();
+}
+
+/**
+ * @brief	find netdev by given specified name
+ */
+netdev_t *netdev_get_by_name(const char *name)
+{
+	netdev_t *netdev;
+
+	mutex_lock(&netdev_list_lock);
+
+	netdev = netdev_find_by_name(name);
+
+	mutex_unlock(&netdev_list_lock);
+
+	return netdev;
 }
 
 /**

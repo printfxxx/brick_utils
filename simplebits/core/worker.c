@@ -877,19 +877,15 @@ static int cmd_parse_netdev(const char *str, netdev_t **netdev,
 			    proto_handle_t *handle)
 {
 	int rc;
-	struct list_head *list;
 
-	list = netdev_list_acquire_read();
-
-	if (!(*netdev = netdev_find_by_name(list, str))) {
+	if (!(*netdev = netdev_get_by_name(str))) {
 		rc = -ENODEV;
 		goto err;
 	}
 
-	rc = 0;
+	return 0;
 err:
-	netdev_list_release_read(list);
-	if (rc && handle) {
+	if (handle) {
 		cmd_pr_err(handle, "ERR: invalid netdev \"%s\"\n", str);
 	}
 	return rc;

@@ -17,7 +17,7 @@
 
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
-#include <linux/rwsem.h>
+#include <linux/mutex.h>
 #include <linux/ktime.h>
 
 #include "time.h"
@@ -63,22 +63,15 @@ typedef struct netdev {
 	ktime_t time_start, time_stop, time_prev;
 	seqcount_t stats_seq;
 	__percpu netdev_pcpu_t *pcpu;
-	struct rw_semaphore lock;
+	struct mutex lock;
 	struct list_head node;
 } netdev_t;
 
-netdev_t *netdev_find(const struct list_head *list,
-		      const struct net_device *find);
-netdev_t *netdev_find_by_name(const struct list_head *list,
-			      const char *name);
-struct list_head *netdev_list_acquire_read(void);
-void netdev_list_release_read(const struct list_head *list);
-struct list_head *netdev_list_acquire_write(void);
-void netdev_list_release_write(const struct list_head *list);
 int __init netdev_add_all(void);
 void netdev_del_all(void);
 
 bool netdev_in_filter(const char *name);
+netdev_t *netdev_get_by_name(const char *name);
 struct net_device *dummy_netdev_add(int sizeof_priv, unsigned int count);
 void dummy_netdev_del(struct net_device *ndev);
 void dummy_netdev_receive(struct sk_buff *skb, struct net_device *ndev);
