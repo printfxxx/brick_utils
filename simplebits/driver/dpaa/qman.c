@@ -1,16 +1,45 @@
-/*
- * Copyright (C) 2016
+/* Copyright 2008-2012 Freescale Semiconductor, Inc.
  *
- * Brick Yang <printfxxx@163.com>
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *     * Redistributions of source code must retain the above copyright
+ *       notice, this list of conditions and the following disclaimer.
+ *     * Redistributions in binary form must reproduce the above copyright
+ *       notice, this list of conditions and the following disclaimer in the
+ *       documentation and/or other materials provided with the distribution.
+ *     * Neither the name of Freescale Semiconductor nor the
+ *       names of its contributors may be used to endorse or promote products
+ *       derived from this software without specific prior written permission.
  *
- * This program is free software. You can redistribute it and/or
- * modify it as you like.
+ *
+ * ALTERNATIVELY, this software may be distributed under the terms of the
+ * GNU General Public License ("GPL") as published by the Free Software
+ * Foundation, either version 2 of that License or (at your option) any
+ * later version.
+ *
+ * THIS SOFTWARE IS PROVIDED BY Freescale Semiconductor ``AS IS'' AND ANY
+ * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL Freescale Semiconductor BE LIABLE FOR ANY
+ * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 /**
  * @file	qman.c
  * @brief	qman driver
  */
+
+#include <linux/init.h>
+#include <linux/kernel.h>
+#include <linux/types.h>
+#include <linux/rbtree.h>
+#include <linux/cpumask.h>
+#include <linux/spinlock.h>
 
 #include "qman.h"
 
@@ -84,15 +113,11 @@ static DEFINE_PER_CPU(struct qman_portal, qman_affine_portal);
 /* "raw" gets the cpu-local struct whether it's a redirect or not. */
 static inline struct qman_portal *get_raw_affine_portal(void)
 {
-	return &get_cpu_var(qman_affine_portal);
+	return this_cpu_ptr(&qman_affine_portal);
 }
 /* For ops that can redirect, this obtains the portal to use */
 #define get_affine_portal() get_raw_affine_portal()
-/* For every "get", there must be a "put" */
-static inline void put_affine_portal(void)
-{
-	put_cpu_var(qman_affine_portal);
-}
+#define put_affine_portal()
 /* Exception: poll functions assume the caller is cpu-affine and in no risk of
  * re-entrance, which are the two reasons we usually use the get/put_cpu_var()
  * semantic - ie. to disable pre-emption. Some use-cases expect the execution
@@ -101,7 +126,7 @@ static inline void put_affine_portal(void)
  * this case to not disable pre-emption. */
 static inline struct qman_portal *get_poll_portal(void)
 {
-	return &get_cpu_var(qman_affine_portal);
+	return this_cpu_ptr(&qman_affine_portal);
 }
 #define put_poll_portal()
 
@@ -153,7 +178,8 @@ int qman_setup_fq_lookup_table(size_t num_entries)
 	return 0;
 }
 
-void qman_clean_fq_lookup_table(void) {
+void qman_clean_fq_lookup_table(void)
+{
 	vfree(qman_fq_lookup_table);
 }
 
@@ -266,7 +292,8 @@ loop:
 
 struct qman_portal *qman_create_portal(
 			struct qman_portal *portal,
-			const struct qm_portal_config *config)
+			const struct qm_portal_config *config,
+			const struct qman_cgrs *cgrs)
 {
 	struct qm_portal *__p;
 	char buf[16];
@@ -415,13 +442,14 @@ fail_eqcr:
 }
 
 struct qman_portal *qman_create_affine_portal(
-			const struct qm_portal_config *config)
+			const struct qm_portal_config *config,
+			const struct qman_cgrs *cgrs)
 {
 	struct qman_portal *res;
 	struct qman_portal *portal;
 
-	portal = &per_cpu(qman_affine_portal, config->public_cfg.cpu);
-	res = qman_create_portal(portal, config);
+	portal = per_cpu_ptr(&qman_affine_portal, config->public_cfg.cpu);
+	res = qman_create_portal(portal, config, cgrs);
 	return res;
 }
 
@@ -458,13 +486,17 @@ void qman_destroy_portal(struct qman_portal *qm)
 		kfree(qm);
 }
 
-void qman_destroy_affine_portal(const struct qm_portal_config *config)
+const struct qm_portal_config *qman_destroy_affine_portal(void)
 {
-	struct qman_portal *portal;
+	struct qman_portal *p;
+	const struct qm_portal_config *pcfg;
 
-	portal = &per_cpu(qman_affine_portal, config->public_cfg.cpu);
+	p = get_raw_affine_portal();
+	pcfg = p->config;
+	qman_destroy_portal(p);
+	put_affine_portal();
 
-	qman_destroy_portal(portal);
+	return pcfg;
 }
 
 /* remove some slowish-path stuff from the "fast path" and make sure it isn't

@@ -22,8 +22,6 @@
 #include <linux/of.h>
 #include <linux/of_mdio.h>
 
-#include <linux/fsl_qman.h>
-
 #include "netdev.h"
 #include "worker.h"
 #include "qman.h"
@@ -37,6 +35,8 @@
 
 #define INV_BPID	(0xffff)
 #define INV_FQID	(0xffffffff)
+
+#define DEFINE_KSYM_PTR(x)	typeof(x) *ksym_##x
 
 typedef struct qportal_info {
 	struct qman_portal *p;
@@ -70,14 +70,15 @@ typedef struct dpaa_ndev {
 	struct list_head node;
 } dpaa_ndev_t;
 
+static DEFINE_KSYM_PTR(qm_get_unused_portal);
+static DEFINE_KSYM_PTR(qm_put_unused_portal);
+static DEFINE_KSYM_PTR(bm_get_unused_portal);
+static DEFINE_KSYM_PTR(bm_put_unused_portal);
+
 static unsigned long skb_buf_nr = 2048;
 static LIST_HEAD(dpaa_eth_priv_list);
 static DEFINE_PER_CPU(qportal_info_t, cpu_qportal_infos);
 static DEFINE_PER_CPU(bportal_info_t, cpu_bportal_infos);
-static struct qm_portal_config *(*ksym_qm_get_unused_portal)(void);
-static void (*ksym_qm_put_unused_portal)(struct qm_portal_config *);
-static struct bm_portal_config *(*ksym_bm_get_unused_portal)(void);
-static void (*ksym_bm_put_unused_portal)(struct bm_portal_config *);
 
 module_param_named(bufs, skb_buf_nr, ulong, S_IRUGO);
 MODULE_PARM_DESC(bufs, "Number of skb buffers");
@@ -104,12 +105,9 @@ err:
 
 static void affine_qportal_release(void *arg)
 {
-	unsigned int cpu;
 	qportal_info_t *info;
 
-	cpu = smp_processor_id();
-	info = per_cpu_ptr(&cpu_qportal_infos, cpu);
-
+	info = this_cpu_ptr(&cpu_qportal_infos);
 	if (info->cfg) {
 		ksym_qm_put_unused_portal(info->cfg);
 		info->cfg = NULL;
@@ -122,8 +120,7 @@ static int cpu_qportal_create(unsigned int cpu)
 	qportal_info_t *info;
 
 	info = per_cpu_ptr(&cpu_qportal_infos, cpu);
-
-	if (!(info->p = qman_create_affine_portal(info->cfg))) {
+	if (!(info->p = qman_create_affine_portal(info->cfg, NULL))) {
 		pr_err("CPU %u: failed to create qman portal\n", cpu);
 		rc = -EIO;
 		goto err;
@@ -134,14 +131,16 @@ err:
 	return rc;
 }
 
-static void cpu_qportal_destroy(unsigned int cpu)
+static void cpu_qportal_destroy(void *arg)
 {
 	qportal_info_t *info;
+	const struct qm_portal_config *cfg;
 
-	info = per_cpu_ptr(&cpu_qportal_infos, cpu);
+	info = this_cpu_ptr(&cpu_qportal_infos);
 
 	if (info->p) {
-		qman_destroy_affine_portal(info->cfg);
+		cfg = qman_destroy_affine_portal();
+		BUG_ON(info->cfg != cfg);
 		info->p = NULL;
 	}
 }
@@ -168,12 +167,9 @@ err:
 
 static void affine_bportal_release(void *arg)
 {
-	unsigned int cpu;
 	bportal_info_t *info;
 
-	cpu = smp_processor_id();
-	info = per_cpu_ptr(&cpu_bportal_infos, cpu);
-
+	info = this_cpu_ptr(&cpu_bportal_infos);
 	if (info->cfg) {
 		ksym_bm_put_unused_portal(info->cfg);
 		info->cfg = NULL;
@@ -186,7 +182,6 @@ static int cpu_bportal_create(unsigned int cpu)
 	bportal_info_t *info;
 
 	info = per_cpu_ptr(&cpu_bportal_infos, cpu);
-
 	if (!(info->p = bman_create_affine_portal(info->cfg))) {
 		pr_err("CPU %u: failed to create bman portal\n", cpu);
 		rc = -EIO;
@@ -198,14 +193,16 @@ err:
 	return rc;
 }
 
-static void cpu_bportal_destroy(unsigned int cpu)
+static void cpu_bportal_destroy(void *arg)
 {
 	bportal_info_t *info;
+	const struct bm_portal_config *cfg;
 
-	info = per_cpu_ptr(&cpu_bportal_infos, cpu);
+	info = this_cpu_ptr(&cpu_bportal_infos);
 
 	if (info->p) {
-		bman_destroy_affine_portal(info->cfg);
+		cfg = bman_destroy_affine_portal();
+		BUG_ON(info->cfg != cfg);
 		info->p = NULL;
 	}
 }
@@ -369,7 +366,7 @@ static struct bman_pool *dpaa_bpool_init(struct net_device *ndev, uint32_t bpid,
 	for (cnt = 0; cnt < nr;) {
 		ret = nr - cnt;
 		ret =min(ret, 8);
-		memset(bufs, 0, sizeof(bufs[0]));
+		memset(bufs, 0, sizeof(bufs[0]) * ret);
 		for (i = 0; i < ret; i++) {
 			if (!(skb = __netdev_alloc_skb(ndev, sz, GFP_KERNEL | GFP_DMA))
 			||  (skb_headroom(skb) < NET_SKB_PAD)) {
@@ -889,7 +886,7 @@ static int dpaa_netdev_add(struct device *dev)
 		goto ok;
 	}
 
-	if (!(ndev = dummy_netdev_add(sizeof(*netdev), NR_CPUS))) {
+	if (!(ndev = dummy_netdev_add(sizeof(*netdev), nr_cpu_ids))) {
 		pr_err("%s(): failed to add dummy ethernet device\n", __func__);
 		rc = -ENOMEM;
 		goto err;
@@ -900,7 +897,6 @@ static int dpaa_netdev_add(struct device *dev)
 	ndev->priv_flags |= IFF_TX_SKB_SHARING;
 	memcpy(ndev->name, name, sizeof(name));
 	netdev = netdev_priv(ndev);
-	netdev->ndev = ndev;
 	INIT_LIST_HEAD(&netdev->node);
 	netdev->ndev = ndev;
 	netdev->mdev = mdev;
@@ -1120,10 +1116,11 @@ static int __init dpaa_init(void)
 		void **fn;
 		const char *name;
 	} ksyms_table[] = {
-		{(void **)&ksym_qm_get_unused_portal, "qm_get_unused_portal"},
-		{(void **)&ksym_qm_put_unused_portal, "qm_put_unused_portal"},
-		{(void **)&ksym_bm_get_unused_portal, "bm_get_unused_portal"},
-		{(void **)&ksym_bm_put_unused_portal, "bm_put_unused_portal"},
+#define KSYM_TBL_ENTRY(x)	{(void **)&ksym_##x, #x}
+		KSYM_TBL_ENTRY(qm_get_unused_portal),
+		KSYM_TBL_ENTRY(qm_put_unused_portal),
+		KSYM_TBL_ENTRY(bm_get_unused_portal),
+		KSYM_TBL_ENTRY(bm_put_unused_portal),
 	};
 
 	if ((rc = mtrace_init())) {
@@ -1211,21 +1208,15 @@ err_netdev_start:
 		dummy_netdev_notify(netdev->ndev, NETDEV_DOWN, NULL);
 	}
 err_netdev_add:
-	/* Waitting for on-the-fly frames finish */
-	msleep(MSEC_PER_SEC);
 	list_for_each_entry_safe(netdev, tmp, &dpaa_eth_priv_list, node) {
 		dpaa_netdev_del(netdev);
 	}
 err_bportal_create:
-	for_each_online_cpu(cpu) {
-		cpu_bportal_destroy(cpu);
-	}
+	on_each_cpu(cpu_bportal_destroy, NULL, 1);
 err_bportal_acquire:
 	on_each_cpu(affine_bportal_release, NULL, 1);
 err_qportal_create:
-	for_each_online_cpu(cpu) {
-		cpu_qportal_destroy(cpu);
-	}
+	on_each_cpu(cpu_qportal_destroy, NULL, 1);
 err_qportal_acquire:
 	on_each_cpu(affine_qportal_release, NULL, 1);
 err_lookup_syms:
@@ -1238,7 +1229,6 @@ err:
 
 static void __exit dpaa_exit(void)
 {
-	unsigned int cpu;
 	dpaa_ndev_t *netdev, *tmp;
 
 	list_for_each_entry_safe(netdev, tmp, &dpaa_eth_priv_list, node) {
@@ -1259,14 +1249,10 @@ static void __exit dpaa_exit(void)
 		dpaa_netdev_del(netdev);
 	}
 
-	for_each_online_cpu(cpu) {
-		cpu_bportal_destroy(cpu);
-	}
+	on_each_cpu(cpu_bportal_destroy, NULL, 1);
 	on_each_cpu(affine_bportal_release, NULL, 1);
 
-	for_each_online_cpu(cpu) {
-		cpu_qportal_destroy(cpu);
-	}
+	on_each_cpu(cpu_qportal_destroy, NULL, 1);
 	on_each_cpu(affine_qportal_release, NULL, 1);
 
 	qman_clean_fq_lookup_table();
