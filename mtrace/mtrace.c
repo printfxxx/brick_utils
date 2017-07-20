@@ -20,10 +20,12 @@
 #include <linux/percpu.h>
 #include <linux/device.h>
 #include <linux/rbtree.h>
+#include <linux/vmalloc.h>
 #else	/* __KERNEL__ */
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 
 #include "sys_api.h"
 #include "rbtree.h"
@@ -63,7 +65,7 @@ const char *mtrace_type[] = {
 typedef struct mtrace_node {
 	const void *ptr;
 	const char *name;
-	int line;
+	int line, refs;
 	struct rb_node node;
 } mtrace_node_t;
 
@@ -101,6 +103,7 @@ static void mtrace_set(mtrace_node_t *n, const void *ptr, const char *name, int 
 	n->ptr = ptr;
 	n->name = name;
 	n->line = line;
+	n->refs = 0;
 }
 
 static int mtrace_add(const void *ptr, int type, const char *name, int line)
@@ -109,13 +112,6 @@ static int mtrace_add(const void *ptr, int type, const char *name, int line)
 	mtrace_node_t *n, *t;
 	mtrace_root_t *r = &mtrace_root[type];
 	struct rb_node **node, *parent = NULL;
-
-	if (!(n = kmem_cache_alloc(mtrace_cache, GFP_ATOMIC))) {
-		rc = -ENOMEM;
-		goto err;
-	}
-
-	mtrace_set(n, ptr, name, line);
 
 	spin_lock_bh(&r->lock);
 
@@ -129,17 +125,27 @@ static int mtrace_add(const void *ptr, int type, const char *name, int line)
 		} else if (ptr > t->ptr) {
 			node = &(*node)->rb_right;
 		} else {
-			spin_unlock_bh(&r->lock);
-			kmem_cache_free(mtrace_cache, n);
-			rc = -EEXIST;
-			goto err;
+			n = t;
+			if (n->refs == INT_MAX) {
+				rc = -ENOMEM;
+				goto err;
+			} else {
+				goto ok;
+			}
 		}
 	}
+
+	if (!(n = kmem_cache_alloc(mtrace_cache, GFP_ATOMIC))) {
+		rc = -ENOMEM;
+		spin_unlock_bh(&r->lock);
+		goto err;
+	}
+	mtrace_set(n, ptr, name, line);
 	rb_link_node(&n->node, parent, node);
 	rb_insert_color(&n->node, &r->root);
-
+ok:
+	n->refs++;
 	spin_unlock_bh(&r->lock);
-
 	return 0;
 err:
 	return rc;
@@ -153,8 +159,12 @@ static void mtrace_del(const void *ptr, int type, const char *name, int line)
 	spin_lock_bh(&r->lock);
 
 	if ((n = mtrace_find(ptr, type))) {
-		rb_erase(&n->node, &r->root);
-		kmem_cache_free(mtrace_cache, n);
+		BUG_ON(!(n->refs));
+		n->refs--;
+		if (!n->refs) {
+			rb_erase(&n->node, &r->root);
+			kmem_cache_free(mtrace_cache, n);
+		}
 	} else {
 		pr_err("%s: failed to find %p at %s(), line %d\n",
 		       mtrace_type[type], ptr, name, line);

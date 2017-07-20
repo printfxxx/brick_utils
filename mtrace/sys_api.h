@@ -18,6 +18,7 @@
 #ifndef __KERNEL__
 
 #include <stdio.h>
+#include <assert.h>
 #include <pthread.h>
 
 #define GFP_ATOMIC	0
@@ -33,6 +34,7 @@
 #endif
 
 #define EXPORT_SYMBOL(sym)
+#define BUG_ON(x)		assert(!(x))
 
 #define pr_in(fmt, ...)		fprintf(stdin, fmt, ##__VA_ARGS__)
 #define pr_err(fmt, ...)	fprintf(stderr, fmt, ##__VA_ARGS__)
