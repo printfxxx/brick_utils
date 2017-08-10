@@ -939,7 +939,7 @@ static int process_cmd_from_arg(proto_handle_t *handle, int argc, const char *ar
 	}
 	param.len = PROTO_BUF_MAX;
 
-	for (i = 0; i <= ARRAY_SIZE(cmd_tbl); i++) {
+	for (i = 0; i < ARRAY_SIZE(cmd_tbl); i++) {
 		if (!strcmp(argv[0], cmd_tbl[i].name)) {
 			param.cmd = &cmd_tbl[i];
 			break;
