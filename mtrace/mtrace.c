@@ -202,7 +202,7 @@ int mtrace_init(void)
 	if (mtrace_cache) {
 		return 0;
 	} else {
-		return -1;
+		return -ENOMEM;
 	}
 }
 

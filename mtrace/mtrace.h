@@ -184,6 +184,7 @@ void notrace_free_percpu(void __percpu *p);
 
 #undef malloc
 #undef free
+#undef strdup
 
 #define malloc(size)		mtrace_malloc(size, __func__, __LINE__)
 #define free(p)			mtrace_free(p, __func__, __LINE__)
