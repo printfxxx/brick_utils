@@ -337,7 +337,10 @@ int main(int argc, const char *argv[])
 	int rc;
 	const struct mem_op *op = mem_op_handler;
 
-	mtrace_init();
+	if ((rc = mtrace_init())) {
+		rc = -rc;
+		goto err_mtrace;
+	}
 
 	if (argc < 2) {
 		fprintf(stderr, "ERROR: too few argument!\n");
@@ -371,6 +374,7 @@ err:
 		print_help();
 	}
 	mtrace_finish();
+err_mtrace:
 	return rc;
 ok:
 	mtrace_finish();
