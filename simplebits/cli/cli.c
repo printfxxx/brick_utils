@@ -1014,7 +1014,10 @@ int main(int argc, const char *argv[])
 	proto_handle_t handle = {};
 	struct sockaddr_in sin;
 
-	mtrace_init();
+	if ((rc = mtrace_init())) {
+		rc = -rc;
+		goto err_mtrace;
+	}
 
 	if ((ip_env = getenv("SB_IP"))) {
 		s = strsep(&ip_env, ":");
@@ -1090,7 +1093,7 @@ err:
 		shutdown(sockfd, SHUT_RDWR);
 		close(sockfd);
 	}
-
+err_mtrace:
 	mtrace_finish();
 
 	return rc;
