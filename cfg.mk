@@ -28,7 +28,7 @@ sb_cli = simplebits/cli/
 
 # === Flags For Compiler & Linker ===
 # Flags to give to C compiler
-CFLAGS = -O0 -g3 -Wall -Wundef -Wstrict-prototypes -Wno-trigraphs \
+CFLAGS = -O2 -g3 -Wall -Wundef -Wstrict-prototypes -Wno-trigraphs \
 	 -Werror-implicit-function-declaration -Wno-format-security -Wno-sign-compare \
 	 -Wno-unused-but-set-variable -Wdeclaration-after-statement -Wno-pointer-sign \
 	 --sysroot=$(SDK_SYSROOT) -I$(topdir)mtrace
