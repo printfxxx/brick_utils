@@ -22,11 +22,14 @@
 #include <unistd.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <inttypes.h>
 
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <sys/types.h>
+
+#include <asm/byteorder.h>
 
 #include "mtrace.h"
 
@@ -104,17 +107,62 @@ err:
 	return ENOMEM;
 }
 
+static void parse_arg(const char *str, bool *be, bool *le, unsigned int *width)
+{
+	const char *dot;
+
+	switch (str[1]) {
+	case 'b':
+		*be = true;
+		*le = false;
+		break;
+	case 'l':
+		*be = false;
+		*le = true;
+		break;
+	default:
+		*be = false;
+		*le = false;
+		break;
+	}
+
+	dot = strchr(str, '.');
+	if (dot) {
+		switch (dot[1]) {
+		case 'b':
+			*width = 1;
+			break;
+		case 'w':
+			*width = 2;
+			break;
+		case 'q':
+			*width = 8;
+			break;
+		case 'l':
+		default:
+			*width = 4;
+			break;
+		}
+	} else {
+		*width = 4;
+	}
+}
+
 static int mem_read(int argc, const char *argv[])
 {
 	int rc;
 	void *vaddr;
-	uint64_t addr;
+	bool be, le;
+	uint8_t u8;
+	uint16_t u16;
+	uint32_t u32;
+	uint64_t u64, addr;
 	unsigned int i, n, skip, count = 1, width = sizeof(uint32_t);
 	union {
-		uint8_t   u8[LINE_BYTES / sizeof(uint8_t)  + 1];
-		uint16_t u16[LINE_BYTES / sizeof(uint16_t) + 1];
-		uint32_t u32[LINE_BYTES / sizeof(uint32_t) + 1];
-		uint64_t u64[LINE_BYTES / sizeof(uint64_t) + 1];
+		uint8_t   u8[LINE_BYTES / sizeof(uint8_t) + 1];
+		uint16_t u16[LINE_BYTES / sizeof(uint16_t)];
+		uint32_t u32[LINE_BYTES / sizeof(uint32_t)];
+		uint64_t u64[LINE_BYTES / sizeof(uint64_t)];
 	} linebuf;
 
 	switch (argc) {
@@ -129,21 +177,7 @@ static int mem_read(int argc, const char *argv[])
 		goto err;
 	}
 
-	if (strlen(argv[0]) == 3) {
-		switch (argv[0][2]) {
-		case 'b':
-			width = sizeof(uint8_t);
-			break;
-		case 'w':
-			width = sizeof(uint16_t);
-			break;
-		case 'd':
-			width = sizeof(uint64_t);
-			break;
-		default:
-			break;
-		}
-	}
+	parse_arg(argv[0], &be, &le, &width);
 
 	addr &= ~(uint64_t)(width - 1);
 	if ((rc = map_dev_mem(addr, count * width))) {
@@ -161,21 +195,31 @@ static int mem_read(int argc, const char *argv[])
 		for (i = 0; i < n; i++) {
 			switch (width) {
 			case 1:
-				linebuf.u8[i] = *(volatile uint8_t *)vaddr;
-				printf(" %02" PRIx8, linebuf.u8[i]);
+				u8 = *(volatile uint8_t *)vaddr;
+				linebuf.u8[i] = u8;
+				printf(" %02" PRIx8, u8);
 				break;
 			case 2:
-				linebuf.u16[i] = *(volatile uint16_t *)vaddr;
-				printf(" %04" PRIx16, linebuf.u16[i]);
+				u16 = *(volatile uint16_t *)vaddr;
+				linebuf.u16[i] = u16;
+				u16 = be ? __be16_to_cpu(u16) : u16;
+				u16 = le ? __le16_to_cpu(u16) : u16;
+				printf(" %04" PRIx16, u16);
 				break;
 			case 8:
-				linebuf.u64[i] = *(volatile uint64_t *)vaddr;
-				printf(" %016" PRIx64, linebuf.u64[i]);
+				u64 = *(volatile uint64_t *)vaddr;
+				linebuf.u64[i] = u64;
+				u64 = be ? __be64_to_cpu(u64) : u64;
+				u64 = le ? __le64_to_cpu(u64) : u64;
+				printf(" %016" PRIx64, u64);
 				break;
 			case 4:
 			default:
-				linebuf.u32[i] = *(volatile uint32_t *)vaddr;
-				printf(" %08" PRIx32, linebuf.u32[i]);
+				u32 = *(volatile uint32_t *)vaddr;
+				linebuf.u32[i] = u32;
+				u32 = be ? __be32_to_cpu(u32) : u32;
+				u32 = le ? __le32_to_cpu(u32) : u32;
+				printf(" %08" PRIx32, u32);
 				break;
 			}
 			vaddr += width;
@@ -206,15 +250,19 @@ static int mem_write(int argc, const char *argv[])
 {
 	int rc;
 	void *vaddr;
-	uint64_t addr, data;
-	unsigned int count = 1, width = sizeof(uint32_t);
+	bool be, le;
+	uint8_t u8 = 0;
+	uint16_t u16 = 0;
+	uint32_t u32 = 0;
+	uint64_t addr, u64;
+	unsigned int count = 1, width;
 
 	switch (argc) {
 	case 4:
 		count = strtoul(argv[3], NULL, 16);
 	case 3:
 		addr = strtoull(argv[1], NULL, 16);
-		data = strtoull(argv[2], NULL, 16);
+		u64 = strtoull(argv[2], NULL, 16);
 		break;
 	default:
 		fprintf(stderr, "ERROR: Bad format for command \"%s\"\n", argv[0]);
@@ -222,21 +270,7 @@ static int mem_write(int argc, const char *argv[])
 		goto err;
 	}
 
-	if (strlen(argv[0]) == 3) {
-		switch (argv[0][2]) {
-		case 'b':
-			width = sizeof(uint8_t);
-			break;
-		case 'w':
-			width = sizeof(uint16_t);
-			break;
-		case 'd':
-			width = sizeof(uint64_t);
-			break;
-		default:
-			break;
-		}
-	}
+	parse_arg(argv[0], &be, &le, &width);
 
 	addr &= ~(uint64_t)(width - 1);
 	if ((rc = map_dev_mem(addr, count * width))) {
@@ -244,20 +278,41 @@ static int mem_write(int argc, const char *argv[])
 	}
 	vaddr = (uint8_t *)dev_mem.vaddr + (addr - dev_mem.offset);
 
+	switch (width) {
+	case 1:
+		u8 = (uint8_t)u64;
+		break;
+	case 2:
+		u16 = (uint16_t)u64;
+		u16 = be ? __cpu_to_be16(u16) : u16;
+		u16 = le ? __cpu_to_le16(u16) : u16;
+		break;
+	case 8:
+		u64 = be ? __cpu_to_be64(u64) : u64;
+		u64 = le ? __cpu_to_le64(u64) : u64;
+		break;
+	case 4:
+	default:
+		u32 = (uint32_t)u64;
+		u32 = be ? __cpu_to_be32(u32) : u32;
+		u32 = le ? __cpu_to_le32(u32) : u32;
+		break;
+	}
+
 	while (count--) {
 		switch (width) {
 		case 1 :
-			*(volatile uint8_t *)vaddr = (uint8_t)data;
+			*(volatile uint8_t *)vaddr = u8;
 			break;
 		case 2 :
-			*(volatile uint16_t *)vaddr = (uint16_t)data;
+			*(volatile uint16_t *)vaddr = u16;
 			break;
 		case 8 :
-			*(volatile uint64_t *)vaddr = (uint64_t)data;
+			*(volatile uint64_t *)vaddr = u64;
 			break;
 		case 4 :
 		default :
-			*(volatile uint32_t *)vaddr = (uint32_t)data;
+			*(volatile uint32_t *)vaddr = u32;
 			break;
 		}
 		vaddr += width;
@@ -305,18 +360,34 @@ err:
 }
 
 const struct mem_op mem_op_handler[] = {
-	{"r",   mem_read,  "r   [ addr ] [[ count ]]          - Read physical memory, width is 4-byte"},
-	{"r.b", mem_read,  "r.b [ addr ] [[ count ]]          - Read physical memory, width is 1-byte"},
-	{"r.w", mem_read,  "r.w [ addr ] [[ count ]]          - Read physical memory, width is 2-byte"},
-	{"r.l", mem_read,  "r.l [ addr ] [[ count ]]          - Read physical memory, width is 4-byte"},
-	{"r.d", mem_read,  "r.d [ addr ] [[ count ]]          - Read physical memory, width is 8-byte"},
-	{"w",   mem_write, "w   [ addr ] [ data ] [[ count ]] - Write physical memory, width is 4-byte"},
-	{"w.b", mem_write, "w.b [ addr ] [ data ] [[ count ]] - Write physical memory, width is 1-byte"},
-	{"w.w", mem_write, "w.w [ addr ] [ data ] [[ count ]] - Write physical memory, width is 2-byte"},
-	{"w.l", mem_write, "w.l [ addr ] [ data ] [[ count ]] - Write physical memory, width is 4-byte"},
-	{"w.d", mem_write, "w.d [ addr ] [ data ] [[ count ]] - Write physical memory, width is 8-byte"},
-	{"w.s", mem_wstr,  "w.s [ addr ] [ string ]           - Write string to physical memory"},
-	{NULL, NULL, NULL}
+	{"r",    mem_read,  "[ addr ] [[ count ]]          - Read physical memory, width is 4-byte"},
+	{"rb",   mem_read,  "[ addr ] [[ count ]]          - Read physical memory, width is 4-byte, big-endian"},
+	{"rl",   mem_read,  "[ addr ] [[ count ]]          - Read physical memory, width is 4-byte, little-endian"},
+	{"r.b",  mem_read,  "[ addr ] [[ count ]]          - Read physical memory, width is 1-byte"},
+	{"r.w",  mem_read,  "[ addr ] [[ count ]]          - Read physical memory, width is 2-byte"},
+	{"rb.w", mem_read,  "[ addr ] [[ count ]]          - Read physical memory, width is 2-byte, big-endian"},
+	{"rl.w", mem_read,  "[ addr ] [[ count ]]          - Read physical memory, width is 2-byte, little-endian"},
+	{"r.l",  mem_read,  "[ addr ] [[ count ]]          - Read physical memory, width is 4-byte"},
+	{"rb.l", mem_read,  "[ addr ] [[ count ]]          - Read physical memory, width is 4-byte, big-endian"},
+	{"rl.l", mem_read,  "[ addr ] [[ count ]]          - Read physical memory, width is 4-byte, little-endian"},
+	{"r.q",  mem_read,  "[ addr ] [[ count ]]          - Read physical memory, width is 8-byte"},
+	{"rb.q", mem_read,  "[ addr ] [[ count ]]          - Read physical memory, width is 8-byte, big-endian"},
+	{"rl.q", mem_read,  "[ addr ] [[ count ]]          - Read physical memory, width is 8-byte, little-endian"},
+	{"w",    mem_write, "[ addr ] [ data ] [[ count ]] - Write physical memory, width is 4-byte"},
+	{"wb",   mem_write, "[ addr ] [ data ] [[ count ]] - Write physical memory, width is 4-byte, big-endian"},
+	{"wl",   mem_write, "[ addr ] [ data ] [[ count ]] - Write physical memory, width is 4-byte, little-endian"},
+	{"w.b",  mem_write, "[ addr ] [ data ] [[ count ]] - Write physical memory, width is 1-byte"},
+	{"w.w",  mem_write, "[ addr ] [ data ] [[ count ]] - Write physical memory, width is 2-byte"},
+	{"wb.w", mem_write, "[ addr ] [ data ] [[ count ]] - Write physical memory, width is 2-byte, big-endian"},
+	{"wl.w", mem_write, "[ addr ] [ data ] [[ count ]] - Write physical memory, width is 2-byte, little-endian"},
+	{"w.l",  mem_write, "[ addr ] [ data ] [[ count ]] - Write physical memory, width is 4-byte"},
+	{"wb.l", mem_write, "[ addr ] [ data ] [[ count ]] - Write physical memory, width is 4-byte, big-endian"},
+	{"wl.l", mem_write, "[ addr ] [ data ] [[ count ]] - Write physical memory, width is 4-byte, little-endian"},
+	{"w.q",  mem_write, "[ addr ] [ data ] [[ count ]] - Write physical memory, width is 8-byte"},
+	{"wb.q", mem_write, "[ addr ] [ data ] [[ count ]] - Write physical memory, width is 8-byte, big-endian"},
+	{"wl.q", mem_write, "[ addr ] [ data ] [[ count ]] - Write physical memory, width is 8-byte, little-endian"},
+	{"w.s",  mem_wstr,  "[ addr ] [ string ]           - Write string to physical memory"},
+	{NULL,   NULL, NULL}
 };
 
 static void print_help(void)
@@ -324,9 +395,14 @@ static void print_help(void)
 	const struct mem_op *op = mem_op_handler;
 
 	printf("Usage:\n");
+	printf("mtool [r|w|rb|rl|wb|wl].[b|w|l|q]\n");
+	printf("\n");
+	printf("type:  r|w|rb|rl|wb|wl - read|write|read-be|read-le|write-be|write-le\n");
+	printf("width: b|w|l|q         - byte|word|long|quad-word\n");
+	printf("\n");
 	while (op->name != NULL) {
 		if (op->help != NULL) {
-			printf("mtool %s\n", op->help);
+			printf("mtool %-4s %s\n", op->name, op->help);
 		}
 		op++;
 	}
@@ -367,7 +443,7 @@ int main(int argc, const char *argv[])
 		op++;
 	}
 
-	fprintf(stderr, "ERROR: unknown command %s\n", argv[1]);
+	fprintf(stderr, "ERROR: unknown command \"%s\"\n", argv[1]);
 	rc = EINVAL;
 err:
 	if (rc == EINVAL) {
