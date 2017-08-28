@@ -133,13 +133,16 @@ err:
 
 static void cpu_qportal_destroy(void *arg)
 {
+	unsigned long irqflags;
 	qportal_info_t *info;
 	const struct qm_portal_config *cfg;
 
 	info = this_cpu_ptr(&cpu_qportal_infos);
 
 	if (info->p) {
+		local_irq_save(irqflags);
 		cfg = qman_destroy_affine_portal();
+		local_irq_restore(irqflags);
 		BUG_ON(info->cfg != cfg);
 		info->p = NULL;
 	}
@@ -195,13 +198,16 @@ err:
 
 static void cpu_bportal_destroy(void *arg)
 {
+	unsigned long irqflags;
 	bportal_info_t *info;
 	const struct bm_portal_config *cfg;
 
 	info = this_cpu_ptr(&cpu_bportal_infos);
 
 	if (info->p) {
+		local_irq_save(irqflags);
 		cfg = bman_destroy_affine_portal();
+		local_irq_restore(irqflags);
 		BUG_ON(info->cfg != cfg);
 		info->p = NULL;
 	}
@@ -924,12 +930,12 @@ static int dpaa_netdev_add(struct device *dev)
 	if (bp_count != 1) {
 		netdev_err(ndev, "only support one bpool\n");
 		rc = -EINVAL;
-		goto err_bp_probe;
+		goto err_bp_check;
 	}
 	if (netdev->dpa_bp[0].size < dpa_get_max_frm()) {
 		netdev_err(ndev, "bpool size smaller than maximum frame size\n");
 		rc = -EINVAL;
-		goto err_bp_probe;
+		goto err_bp_check;
 	}
 
 	if (!(netdev->rx_bp = dpaa_bpool_init(ndev, netdev->dpa_bp[0].bpid, netdev->dpa_bp[0].size, skb_buf_nr))) {
@@ -1066,6 +1072,7 @@ err_tx_drain_bp:
 #endif
 	dpaa_bpool_clean(ndev, netdev->rx_bp);
 err_rx_bp:
+err_bp_check:
 	devm_kfree(dev, netdev->dpa_bp);
 err_bp_probe:
 	qman_release_pool(netdev->rx_ch);
