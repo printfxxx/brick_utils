@@ -32,6 +32,10 @@
 
 #include "mtrace.h"
 
+#define DPAA2_DPA_BP_SZ		2048
+#define DPAA2_DPNI_MAX_FRM_SZ	1536
+#define DPAA2_DPNI_DATA_ALIGN	256
+
 #define DEFINE_KSYM_PTR(x)	typeof(x) *ksym_##x
 
 struct dpaa2_fq;
@@ -107,6 +111,9 @@ static DEFINE_KSYM_PTR(dpni_get_attributes);
 static DEFINE_KSYM_PTR(dpni_set_buffer_layout);
 static DEFINE_KSYM_PTR(dpni_set_link_cfg);
 static DEFINE_KSYM_PTR(dpni_set_tx_confirmation_mode);
+static DEFINE_KSYM_PTR(dpni_set_max_frame_length);
+static DEFINE_KSYM_PTR(dpni_set_unicast_promisc);
+static DEFINE_KSYM_PTR(dpni_set_multicast_promisc);
 static DEFINE_KSYM_PTR(dpni_set_pools);
 static DEFINE_KSYM_PTR(dpni_get_queue);
 static DEFINE_KSYM_PTR(dpni_set_queue);
@@ -639,8 +646,6 @@ static int dpaa2_start_xmit(struct sk_buff *skb, struct net_device *ndev)
 		goto err;
 	}
 
-	if (txq)
-	dev_kfree_skb(skb);
 	return NETDEV_TX_OK;
 err:
 	return NETDEV_TX_BUSY;
@@ -665,7 +670,7 @@ static void dpaa2_netdev_poll(struct net_device *ndev, unsigned int limit, bool 
 	struct sk_buff *skb, **skbh;
 #endif
 	swp = this_cpu_ptr(&cpu_dpaa2_io_infos)->swp;
-	for (i = 0; i < 64; i++) {
+	for (i = 0; i < limit; i++) {
 		if (!(dq = qbman_swp_dqrr_next(swp))) {
 			break;
 		}
@@ -969,8 +974,13 @@ static dpni_dev_t *dpaa2_dpni_init(struct net_device *ndev, struct fsl_mc_device
 		goto err_num_queues;
 	}
 
+	if ((ksym_dpni_set_max_frame_length(dprc_mdev->mc_io, 0, dpni->mdev->mc_handle, DPAA2_DPNI_MAX_FRM_SZ))) {
+		netdev_err(ndev, "failed to set max frame length\n");
+		goto err_max_frm;
+	}
+
 	memset(&layout, 0, sizeof(layout));
-	layout.data_align = 256;
+	layout.data_align = DPAA2_DPNI_DATA_ALIGN;
 	layout.options = DPNI_BUF_LAYOUT_OPT_DATA_ALIGN;
 	if ((ksym_dpni_set_buffer_layout(dprc_mdev->mc_io, 0, dpni->mdev->mc_handle, DPNI_QUEUE_RX, &layout))) {
 		netdev_err(ndev, "failed to set rx buffer layout\n");
@@ -998,6 +1008,16 @@ static dpni_dev_t *dpaa2_dpni_init(struct net_device *ndev, struct fsl_mc_device
 		goto err_tx_conf_mode;
 	}
 
+	if ((ksym_dpni_set_unicast_promisc(dprc_mdev->mc_io, 0, dpni->mdev->mc_handle, 1))) {
+		netdev_err(ndev, "failed to enable unicast promiscuous\n");
+		goto err_promisc;
+	}
+
+	if ((ksym_dpni_set_multicast_promisc(dprc_mdev->mc_io, 0, dpni->mdev->mc_handle, 1))) {
+		netdev_err(ndev, "failed to enable multicast promiscuous\n");
+		goto err_promisc;
+	}
+
 	cfg.options = DPNI_LINK_OPT_AUTONEG;
 	if ((ksym_dpni_set_link_cfg(dprc_mdev->mc_io, 0, dpni->mdev->mc_handle, &cfg))) {
 		netdev_err(ndev, "failed to set link cfg\n");
@@ -1007,8 +1027,10 @@ static dpni_dev_t *dpaa2_dpni_init(struct net_device *ndev, struct fsl_mc_device
 	return dpni;
 
 err_link_cfg:
+err_promisc:
 err_tx_conf_mode:
 err_buf_layout:
+err_max_frm:
 err_num_queues:
 err_get_attr:
 err_reset:
@@ -1340,7 +1362,7 @@ static int dpaa2_netdev_probe(struct fsl_mc_device *mdev)
 		goto err_dpcon_init;
 	}
 
-	if (!(netdev->rx_dpbp = dpaa2_dpbp_init(ndev, 2048, skb_buf_nr))) {
+	if (!(netdev->rx_dpbp = dpaa2_dpbp_init(ndev, DPAA2_DPA_BP_SZ, skb_buf_nr))) {
 		netdev_err(ndev, "failed to init rx_dpbp\n");
 		rc = -ENODEV;
 		goto err_rx_dpbp_init;
@@ -1358,7 +1380,7 @@ static int dpaa2_netdev_probe(struct fsl_mc_device *mdev)
 		goto err_dpni_init;
 	}
 
-	if ((rc = dpaa2_dpni_set_dpbp(ndev, netdev->rx_dpbp, 2048))) {
+	if ((rc = dpaa2_dpni_set_dpbp(ndev, netdev->rx_dpbp, DPAA2_DPA_BP_SZ))) {
 		netdev_err(ndev, "failed to set rx_dpbp for dpni\n");
 		goto err_set_dpbp;
 	}
@@ -1474,6 +1496,9 @@ static int __init dpaa2_init(void)
 		KSYM_TBL_ENTRY(dpni_set_buffer_layout),
 		KSYM_TBL_ENTRY(dpni_set_link_cfg),
 		KSYM_TBL_ENTRY(dpni_set_tx_confirmation_mode),
+		KSYM_TBL_ENTRY(dpni_set_max_frame_length),
+		KSYM_TBL_ENTRY(dpni_set_unicast_promisc),
+		KSYM_TBL_ENTRY(dpni_set_multicast_promisc),
 		KSYM_TBL_ENTRY(dpni_set_pools),
 		KSYM_TBL_ENTRY(dpni_get_queue),
 		KSYM_TBL_ENTRY(dpni_set_queue),
