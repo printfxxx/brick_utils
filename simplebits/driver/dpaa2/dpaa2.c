@@ -1409,7 +1409,9 @@ err_flow_init:
 err_set_dpbp:
 	dpaa2_dpni_clean(ndev, netdev->dpni);
 err_dpni_init:
-	dpaa2_dpbp_clean(ndev, netdev->tx_drain_dpbp);
+	if (!use_tx_conf) {
+		dpaa2_dpbp_clean(ndev, netdev->tx_drain_dpbp);
+	}
 err_tx_drain_dpbp_init:
 	dpaa2_dpbp_clean(ndev, netdev->rx_dpbp);
 err_rx_dpbp_init:

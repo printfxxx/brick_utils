@@ -1044,7 +1044,9 @@ ok:
 err_attach:
 	dpaa_fq_clean(ndev, netdev->tx_fqs, ndev->real_num_tx_queues);
 err_tx_fqs:
-	dpaa_fq_clean(ndev, netdev->tx_conf_fq, 1);
+	if (use_tx_conf) {
+		dpaa_fq_clean(ndev, netdev->tx_conf_fq, 1);
+	}
 err_tx_conf_fq:
 	dpaa_fq_clean(ndev, netdev->tx_err_fq, 1);
 err_tx_err_fq:
@@ -1058,7 +1060,9 @@ err_rx_def_fq:
 	dpaa_fq_clean(ndev, netdev->rx_err_fq, 1);
 err_rx_err_fq:
 err_rx_cfg:
-	dpaa_bpool_clean(ndev, netdev->tx_drain_bp);
+	if (!use_tx_conf) {
+		dpaa_bpool_clean(ndev, netdev->tx_drain_bp);
+	}
 err_tx_drain_bp:
 	dpaa_bpool_clean(ndev, netdev->rx_bp);
 err_rx_bp:
