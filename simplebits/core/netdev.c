@@ -43,12 +43,11 @@ static int netdev_hook_xmit(struct sk_buff *skb, struct net_device *ndev)
 static int netdev_receive(struct sk_buff *skb, struct net_device *ndev,
 			  struct packet_type *pt, struct net_device *orig_dev)
 {
-#ifdef MTRACE
 	if (mtrace_skb_add(skb)) {
 		notrace_kfree_skb(skb);
 		return 0;
 	}
-#endif
+
 	skb->protocol = htons(ETH_P_LOOP);
 	dummy_netdev_receive(skb, ndev);
 	kfree_skb(skb);

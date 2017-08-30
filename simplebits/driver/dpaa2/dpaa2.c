@@ -634,15 +634,11 @@ static int dpaa2_start_xmit(struct sk_buff *skb, struct net_device *ndev)
 	qbman_eq_desc_set_fq(&ed, fq->qid.fqid);
 	qbman_eq_desc_set_qd(&ed, fq->qdid, fq->qid.qdbin, 0);
 	swp = this_cpu_ptr(&cpu_dpaa2_io_infos)->swp;
-#ifdef MTRACE
 	if (mtrace_skb_add(skb)) {
 		goto err;
 	}
-#endif
 	if (qbman_swp_enqueue(swp, &ed, (struct qbman_fd *)&fd)) {
-#ifdef MTRACE
 		mtrace_skb_del(skb);
-#endif
 		goto err;
 	}
 

@@ -262,15 +262,11 @@ static int dpaa_start_xmit(struct sk_buff *skb, struct net_device *ndev)
 #ifdef TX_DRAIN_BP
 	fd.bpid = bman_get_params(netdev->tx_drain_bp)->bpid;
 #endif
-#ifdef MTRACE
 	if (mtrace_skb_add(skb)) {
 		goto err;
 	}
-#endif
 	if (qman_enqueue(fq, &fd, 0)) {
-#ifdef MTRACE
 		mtrace_skb_del(skb);
-#endif
 		goto err;
 	}
 
@@ -915,12 +911,10 @@ static int dpaa_netdev_add(struct device *dev)
 	netdev_dbg(ndev, "rx_ch=%x\n", netdev->rx_ch);
 
 	netdev->dpa_bp = dpa_bp_probe(to_platform_device(dev), &bp_count);
-#ifdef MTRACE
 	if (!IS_ERR(netdev->dpa_bp) && mtrace_devm_add(netdev->dpa_bp)) {
 		notrace_devm_kfree(dev, netdev->dpa_bp);
 		netdev->dpa_bp = ERR_PTR(-ENOMEM);
 	}
-#endif
 	if (IS_ERR(netdev->dpa_bp)) {
 		netdev_err(ndev, "failed to probe bpools\n");
 		rc = PTR_ERR(netdev->dpa_bp);
