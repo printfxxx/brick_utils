@@ -1342,6 +1342,10 @@ static int dpaa2_netdev_probe(struct fsl_mc_device *mdev)
 		goto err;
 	}
 
+	if (!netdev_in_filter(dev_name(&mdev->dev))) {
+		goto ok;
+	}
+
 	if (!(ndev = dummy_netdev_add(sizeof(*netdev), use_tx_conf ? 1 : nr_cpu_ids))) {
 		dev_err(&mdev->dev, "failed to alloc memory\n");
 		rc = -ENOMEM;
@@ -1398,7 +1402,7 @@ static int dpaa2_netdev_probe(struct fsl_mc_device *mdev)
 	mutex_unlock(&dpni_dev_list_lock);
 
 	dev_dbg(&mdev->dev, "probed\n");
-
+ok:
 	return 0;
 
 err_flow_init:
@@ -1428,6 +1432,10 @@ static int dpaa2_netdev_remove(struct fsl_mc_device *mdev)
 		goto err;
 	}
 
+	if (!netdev_in_filter(dev_name(&mdev->dev))) {
+		goto ok;
+	}
+
 	ndev = dev_get_drvdata(&mdev->dev);
 	netdev = netdev_priv(ndev);
 	dpcon = netdev->dpcon;
@@ -1453,7 +1461,7 @@ static int dpaa2_netdev_remove(struct fsl_mc_device *mdev)
 	dummy_netdev_del(ndev);
 
 	dev_dbg(&mdev->dev, "removed\n");
-
+ok:
 	return 0;
 err:
 	return rc;
