@@ -88,13 +88,6 @@ if SIMPLEBITS
 			default y
 			help
 			DPAA2 ethernet driver for simplebits
-
-		config TX_DRAIN_BP
-			depends on SB_DPAA || SB_DPAA2
-			bool "Use tx drain bpool"
-			default n
-			help
-			Use tx drain bpool instead of tx confirm
 	endif
 
 	config SB_CLI

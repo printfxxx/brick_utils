@@ -56,14 +56,9 @@ typedef struct dpaa_fq {
 typedef struct dpaa_ndev {
 	uint16_t rx_ch;
 	uint32_t rx_pcd_fq_nr;
-	struct bman_pool *rx_bp;
+	struct bman_pool *rx_bp, *tx_drain_bp;
 	dpaa_fq_t *rx_err_fq, *rx_def_fq, *rx_pcd_fqs,
-		  *tx_err_fq, *tx_fqs;
-#ifdef TX_DRAIN_BP
-	struct bman_pool *tx_drain_bp;
-#else
-	dpaa_fq_t *tx_conf_fq;
-#endif
+		  *tx_err_fq, *tx_fqs, *tx_conf_fq;
 	struct dpa_bp *dpa_bp;
 	struct net_device *ndev;
 	struct mac_device *mdev;
@@ -75,10 +70,14 @@ static DEFINE_KSYM_PTR(qm_put_unused_portal);
 static DEFINE_KSYM_PTR(bm_get_unused_portal);
 static DEFINE_KSYM_PTR(bm_put_unused_portal);
 
+static bool use_tx_conf = false;
 static unsigned long skb_buf_nr = 2048;
 static LIST_HEAD(dpaa_eth_priv_list);
 static DEFINE_PER_CPU(qportal_info_t, cpu_qportal_infos);
 static DEFINE_PER_CPU(bportal_info_t, cpu_bportal_infos);
+
+module_param_named(tx_conf, use_tx_conf, bool, S_IRUGO);
+MODULE_PARM_DESC(tx_conf, "Use tx confirm");
 
 module_param_named(bufs, skb_buf_nr, ulong, S_IRUGO);
 MODULE_PARM_DESC(bufs, "Number of skb buffers");
@@ -259,9 +258,9 @@ static int dpaa_start_xmit(struct sk_buff *skb, struct net_device *ndev)
 	fq = &netdev->tx_fqs[txq].fq;
 	qm_fd_addr_set64(&fd, baddr);
 	fd.length20 = skb->len;
-#ifdef TX_DRAIN_BP
-	fd.bpid = bman_get_params(netdev->tx_drain_bp)->bpid;
-#endif
+	if (!use_tx_conf) {
+		fd.bpid = bman_get_params(netdev->tx_drain_bp)->bpid;
+	}
 	if (mtrace_skb_add(skb)) {
 		goto err;
 	}
@@ -281,16 +280,19 @@ static struct net_device_ops dpaa_netdev_ops = {
 
 static void dpaa_netdev_poll(struct net_device *ndev, unsigned int limit, bool stride)
 {
-#ifdef TX_DRAIN_BP
 	int i, ret;
 	dma_addr_t baddr;
 	dpaa_ndev_t *netdev;
 	struct device *dev;
 	struct sk_buff *skb, **skbh;
 	struct bm_buffer bufs[8];
-#endif
+
 	qman_poll_dqrr(limit);
-#ifdef TX_DRAIN_BP
+
+	if (use_tx_conf) {
+		goto end;
+	}
+
 	netdev = netdev_priv(ndev);
 	dev = ndev->dev.parent;
 	ret = 8;
@@ -311,7 +313,8 @@ static void dpaa_netdev_poll(struct net_device *ndev, unsigned int limit, bool s
 			dev_kfree_skb(skb);
 		}
 	} while (ret > 0);
-#endif
+end:
+	return;
 }
 
 static netdev_priv_ops_t dpaa_ndev_ops = {
@@ -706,7 +709,6 @@ static enum qman_cb_dqrr_result dpaa_tx_err_dqrr(struct qman_portal *p,
 	return qman_cb_dqrr_consume;
 }
 
-#ifndef TX_DRAIN_BP
 static enum qman_cb_dqrr_result dpaa_tx_conf_dqrr(struct qman_portal *p,
 						  struct qman_fq *fq,
 						  const struct qm_dqrr_entry *dqrr)
@@ -728,7 +730,6 @@ static enum qman_cb_dqrr_result dpaa_tx_conf_dqrr(struct qman_portal *p,
 
 	return qman_cb_dqrr_consume;
 }
-#endif
 
 static void dpaa_netdev_cpu_bind(void *arg)
 {
@@ -911,13 +912,14 @@ static int dpaa_netdev_add(struct device *dev)
 	netdev_dbg(ndev, "rx_ch=%x\n", netdev->rx_ch);
 
 	netdev->dpa_bp = dpa_bp_probe(to_platform_device(dev), &bp_count);
-	if (!IS_ERR(netdev->dpa_bp) && mtrace_devm_add(netdev->dpa_bp)) {
-		notrace_devm_kfree(dev, netdev->dpa_bp);
-		netdev->dpa_bp = ERR_PTR(-ENOMEM);
-	}
 	if (IS_ERR(netdev->dpa_bp)) {
 		netdev_err(ndev, "failed to probe bpools\n");
 		rc = PTR_ERR(netdev->dpa_bp);
+		goto err_bp_probe;
+	}
+	if (mtrace_devm_add(netdev->dpa_bp)) {
+		notrace_devm_kfree(dev, netdev->dpa_bp);
+		rc = -ENOMEM;
 		goto err_bp_probe;
 	}
 	netdev_dbg(ndev, "bpool[%u]: size=%zu\n", netdev->dpa_bp[0].bpid, netdev->dpa_bp[0].size);
@@ -937,13 +939,13 @@ static int dpaa_netdev_add(struct device *dev)
 		rc = -ENODEV;
 		goto err_rx_bp;
 	}
-#ifdef TX_DRAIN_BP
-	if (!(netdev->tx_drain_bp = dpaa_bpool_init(ndev, INV_BPID, 0, 0))) {
+
+	if (!use_tx_conf && !(netdev->tx_drain_bp = dpaa_bpool_init(ndev, INV_BPID, 0, 0))) {
 		netdev_err(ndev, "failed to init tx_drain_bp\n");
 		rc = -ENODEV;
 		goto err_tx_drain_bp;
 	}
-#endif
+
 	fqids[4] = 0;
 	fqids[5] = 0;
 	if ((rc = of_property_read_u32_array(dev->of_node, "fsl,qman-frame-queues-rx", fqids, 6))
@@ -994,28 +996,26 @@ static int dpaa_netdev_add(struct device *dev)
 		rc = -EINVAL;
 		goto err_tx_cfg;
 	}
-#ifndef TX_DRAIN_BP
-	netdev_dbg(ndev, "tx_conf_fqid=%x\n", fqids[2]);
-	if (!fqids[2]) {
-		netdev_err(ndev, "failed to get tx_conf_fqid\n");
-		rc = -EINVAL;
-		goto err_tx_cfg;
+	if (use_tx_conf) {
+		netdev_dbg(ndev, "tx_conf_fqid=%x\n", fqids[2]);
+		if (!fqids[2]) {
+			netdev_err(ndev, "failed to get tx_conf_fqid\n");
+			rc = -EINVAL;
+			goto err_tx_cfg;
+		}
+	} else {
+		fqids[2] = INV_FQID;
 	}
-#else
-	fqids[2] = INV_FQID;
-#endif
 	if (!(netdev->tx_err_fq = dpaa_fq_init(ndev, fqids[0], 1, INV_FQID, netdev->rx_ch, dpaa_tx_err_dqrr))) {
 		netdev_err(ndev, "failed to init tx_err_fq\n");
 		rc = -ENODEV;
 		goto err_tx_err_fq;
 	}
-#ifndef TX_DRAIN_BP
-	if (!(netdev->tx_conf_fq = dpaa_fq_init(ndev, fqids[2], 1, INV_FQID, netdev->rx_ch, dpaa_tx_conf_dqrr))) {
+	if (use_tx_conf && !(netdev->tx_conf_fq = dpaa_fq_init(ndev, fqids[2], 1, INV_FQID, netdev->rx_ch, dpaa_tx_conf_dqrr))) {
 		netdev_err(ndev, "failed to init tx_conf_fq\n");
 		rc = -ENODEV;
 		goto err_tx_conf_fq;
 	}
-#endif
 	channel = fm_get_tx_port_channel(mdev->port_dev[TX]);
 	if (!(netdev->tx_fqs = dpaa_fq_init(ndev, INV_FQID, ndev->real_num_tx_queues, fqids[2], channel, NULL))) {
 		netdev_err(ndev, "failed to init tx_fqs\n");
@@ -1044,10 +1044,8 @@ ok:
 err_attach:
 	dpaa_fq_clean(ndev, netdev->tx_fqs, ndev->real_num_tx_queues);
 err_tx_fqs:
-#ifndef TX_DRAIN_BP
 	dpaa_fq_clean(ndev, netdev->tx_conf_fq, 1);
 err_tx_conf_fq:
-#endif
 	dpaa_fq_clean(ndev, netdev->tx_err_fq, 1);
 err_tx_err_fq:
 err_tx_cfg:
@@ -1060,10 +1058,8 @@ err_rx_def_fq:
 	dpaa_fq_clean(ndev, netdev->rx_err_fq, 1);
 err_rx_err_fq:
 err_rx_cfg:
-#ifdef TX_DRAIN_BP
 	dpaa_bpool_clean(ndev, netdev->tx_drain_bp);
 err_tx_drain_bp:
-#endif
 	dpaa_bpool_clean(ndev, netdev->rx_bp);
 err_rx_bp:
 err_bp_check:
@@ -1088,18 +1084,18 @@ static void dpaa_netdev_del(dpaa_ndev_t *netdev)
 	dpaa_netdev_unbind(netdev);
 
 	dpaa_fq_clean(ndev, netdev->tx_fqs, ndev->real_num_tx_queues);
-#ifndef TX_DRAIN_BP
-	dpaa_fq_clean(ndev, netdev->tx_conf_fq, 1);
-#endif
+	if (use_tx_conf) {
+		dpaa_fq_clean(ndev, netdev->tx_conf_fq, 1);
+	}
 	dpaa_fq_clean(ndev, netdev->tx_err_fq, 1);
 	if (netdev->rx_pcd_fqs) {
 		dpaa_fq_clean(ndev, netdev->rx_pcd_fqs, netdev->rx_pcd_fq_nr);
 	}
 	dpaa_fq_clean(ndev, netdev->rx_def_fq, 1);
 	dpaa_fq_clean(ndev, netdev->rx_err_fq, 1);
-#ifdef TX_DRAIN_BP
-	dpaa_bpool_clean(ndev, netdev->tx_drain_bp);
-#endif
+	if (!use_tx_conf) {
+		dpaa_bpool_clean(ndev, netdev->tx_drain_bp);
+	}
 	dpaa_bpool_clean(ndev, netdev->rx_bp);
 	devm_kfree(ndev->dev.parent, netdev->dpa_bp);
 	qman_release_pool(netdev->rx_ch);

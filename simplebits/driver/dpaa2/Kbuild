@@ -7,4 +7,3 @@ sb_dpaa2-objs := dpaa2.o qbman.o mtrace.o
 ccflags-y += -I$(srctree)/drivers/staging/fsl-mc/include \
 	     -I$(srctree)/drivers/staging/fsl-mc/bus/dpio \
 	     -I$(srctree)/drivers/staging/fsl-dpaa2/ethernet
-ccflags-$(CONFIG_TX_DRAIN_BP) += -DTX_DRAIN_BP

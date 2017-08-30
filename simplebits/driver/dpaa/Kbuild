@@ -12,4 +12,3 @@ ccflags-y += -I$(srctree)/drivers/staging/fsl_qbman
 ccflags-$(CONFIG_FMAN_V3H) += -DFMAN_V3
 ccflags-$(CONFIG_FMAN_V3L) += -DFMAN_V3
 ccflags-$(CONFIG_FMAN_ARM) += -DFMAN_V3
-ccflags-$(CONFIG_TX_DRAIN_BP) += -DTX_DRAIN_BP

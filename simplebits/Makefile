@@ -22,6 +22,6 @@ ifeq ($(CONFIG_SB_PLATFORM_TIME),y)
 KCFLAGS += -DPLATFORM_TIME
 endif
 
-export KCFLAGS CONFIG_TX_DRAIN_BP
+export KCFLAGS
 
 build-driver: build-core

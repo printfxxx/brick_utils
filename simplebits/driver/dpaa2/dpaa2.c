@@ -82,13 +82,8 @@ typedef struct dpaa2_ndev {
 	uint8_t ch_idx;
 	struct net_device *ndev;
 	dpcon_dev_t *dpcon;
-	dpaa2_fq_t *rx_fq, *tx_fqs;
-#ifndef TX_DRAIN_BP
-	dpaa2_fq_t *tx_conf_fq;
-#else
-	dpbp_dev_t *tx_drain_dpbp;
-#endif
-	dpbp_dev_t *rx_dpbp;
+	dpaa2_fq_t *rx_fq, *tx_fqs, *tx_conf_fq;
+	dpbp_dev_t *rx_dpbp, *tx_drain_dpbp;
 	dpni_dev_t *dpni;
 	struct list_head node;
 } dpaa2_ndev_t;
@@ -119,6 +114,7 @@ static DEFINE_KSYM_PTR(dpni_get_queue);
 static DEFINE_KSYM_PTR(dpni_set_queue);
 static DEFINE_KSYM_PTR(dpni_get_qdid);
 
+static bool use_tx_conf = false;
 static unsigned long skb_buf_nr = 2048;
 static struct fsl_mc_device *dprc_mdev;
 
@@ -131,6 +127,9 @@ static DEFINE_MUTEX(dpcon_dev_list_lock);
 static DEFINE_MUTEX(dpbp_dev_list_lock);
 static DEFINE_MUTEX(dpni_dev_list_lock);
 static DEFINE_PER_CPU(dpaa2_io_info_t, cpu_dpaa2_io_infos);
+
+module_param_named(tx_conf, use_tx_conf, bool, S_IRUGO);
+MODULE_PARM_DESC(tx_conf, "Use tx confirm");
 
 module_param_named(bufs, skb_buf_nr, ulong, S_IRUGO);
 MODULE_PARM_DESC(bufs, "Number of skb buffers");
@@ -625,9 +624,9 @@ static int dpaa2_start_xmit(struct sk_buff *skb, struct net_device *ndev)
 	dpaa2_fd_set_addr(&fd, baddr);
 	dpaa2_fd_set_len(&fd, skb->len);
 	dpaa2_fd_set_format(&fd, dpaa2_fd_single);
-#ifdef TX_DRAIN_BP
-	dpaa2_fd_set_bpid(&fd, netdev->tx_drain_dpbp->attr.bpid);
-#endif
+	if (!use_tx_conf) {
+		dpaa2_fd_set_bpid(&fd, netdev->tx_drain_dpbp->attr.bpid);
+	}
 	qbman_eq_desc_clear(&ed);
 	qbman_eq_desc_set_no_orp(&ed, 0);
 	qbman_eq_desc_set_response(&ed, 0, 0);
@@ -651,21 +650,12 @@ static struct net_device_ops dpaa2_netdev_ops = {
 	.ndo_start_xmit = dpaa2_start_xmit,
 };
 
-static void dpaa2_netdev_poll(struct net_device *ndev, unsigned int limit, bool stride)
+static void qbman_poll_dqrr(struct qbman_swp *swp, unsigned int limit)
 {
 	int i;
 	dpaa2_fq_t *fq;
-	struct qbman_swp *swp;
 	const struct dpaa2_dq *dq;
-#ifdef TX_DRAIN_BP
-	int ret;
-	uint64_t bufs[7];
-	dma_addr_t baddr;
-	dpaa2_ndev_t *netdev;
-	struct device *dev;
-	struct sk_buff *skb, **skbh;
-#endif
-	swp = this_cpu_ptr(&cpu_dpaa2_io_infos)->swp;
+
 	for (i = 0; i < limit; i++) {
 		if (!(dq = qbman_swp_dqrr_next(swp))) {
 			break;
@@ -674,7 +664,25 @@ static void dpaa2_netdev_poll(struct net_device *ndev, unsigned int limit, bool 
 		fq->dqrr(swp, fq, dq);
 		qbman_swp_dqrr_consume(swp, dq);
 	}
-#ifdef TX_DRAIN_BP
+}
+
+static void dpaa2_netdev_poll(struct net_device *ndev, unsigned int limit, bool stride)
+{
+	int i, ret;
+	uint64_t bufs[7];
+	dma_addr_t baddr;
+	dpaa2_ndev_t *netdev;
+	struct device *dev;
+	struct sk_buff *skb, **skbh;
+	struct qbman_swp *swp;
+
+	swp = this_cpu_ptr(&cpu_dpaa2_io_infos)->swp;
+	qbman_poll_dqrr(swp, limit);
+
+	if (use_tx_conf) {
+		goto end;
+	}
+
 	netdev = netdev_priv(ndev);
 	dev = ndev->dev.parent;
 	ret = 7;
@@ -695,7 +703,8 @@ static void dpaa2_netdev_poll(struct net_device *ndev, unsigned int limit, bool 
 			dev_kfree_skb(skb);
 		}
 	} while (ret > 0);
-#endif
+end:
+	return;
 }
 
 static netdev_priv_ops_t dpaa2_ndev_ops = {
@@ -994,11 +1003,7 @@ static dpni_dev_t *dpaa2_dpni_init(struct net_device *ndev, struct fsl_mc_device
 		netdev_err(ndev, "failed to set tx confirm buffer layout\n");
 		goto err_buf_layout;
 	}
-#ifdef TX_DRAIN_BP
-	mode = DPNI_CONF_DISABLE;
-#else
-	mode = DPNI_CONF_AFFINE;
-#endif
+	mode = use_tx_conf ? DPNI_CONF_AFFINE : DPNI_CONF_DISABLE;
 	if ((ksym_dpni_set_tx_confirmation_mode(dprc_mdev->mc_io, 0, dpni->mdev->mc_handle, mode))) {
 		netdev_err(ndev, "failed to set tx confirm mode\n");
 		goto err_tx_conf_mode;
@@ -1119,7 +1124,6 @@ static void dpaa2_rx_dqrr(struct qbman_swp *swp, struct dpaa2_fq *fq,
 	dpaa2_recycle_skb(swp, ndev, skb, baddr);
 }
 
-#ifndef TX_DRAIN_BP
 static void dpaa2_tx_conf_dqrr(struct qbman_swp *swp, struct dpaa2_fq *fq,
 			       const struct dpaa2_dq *dq)
 {
@@ -1136,7 +1140,6 @@ static void dpaa2_tx_conf_dqrr(struct qbman_swp *swp, struct dpaa2_fq *fq,
 	skb = *skbh;
 	dev_kfree_skb(skb);
 }
-#endif
 
 static int dpaa2_netdev_fqs_init(dpaa2_ndev_t *netdev)
 {
@@ -1207,7 +1210,11 @@ static int dpaa2_netdev_fqs_init(dpaa2_ndev_t *netdev)
 	}
 	fq = &netdev->tx_fqs[0];
 	netdev_dbg(ndev, "tx_qdid=%x, tx_qdbin=%x:%x\n", fq->qdid, fq->qid.qdbin, ndev->real_num_tx_queues);
-#ifndef TX_DRAIN_BP
+
+	if (!use_tx_conf) {
+		goto ok;
+	}
+
 	if (!(netdev->tx_conf_fq = kzalloc(sizeof(*netdev->tx_conf_fq), GFP_KERNEL))) {
 		netdev_err(ndev, "failed to alloc dev memory\n");
 		rc = -ENOMEM;
@@ -1233,15 +1240,13 @@ static int dpaa2_netdev_fqs_init(dpaa2_ndev_t *netdev)
 		netdev_err(ndev, "failed to set tx_conf queue\n");
 		goto err_set_txcq;
 	}
-#endif
+ok:
 	return 0;
 
-#ifndef TX_DRAIN_BP
 err_set_txcq:
 err_get_txcq:
 	kfree(netdev->tx_conf_fq);
 err_alloc_txcq:
-#endif
 err_get_txqd:
 err_get_txq:
 	kfree(netdev->tx_fqs);
@@ -1256,9 +1261,9 @@ err:
 
 static void dpaa2_netdev_fqs_clean(dpaa2_ndev_t *netdev)
 {
-#ifndef TX_DRAIN_BP
-	kfree(netdev->tx_conf_fq);
-#endif
+	if (use_tx_conf) {
+		kfree(netdev->tx_conf_fq);
+	}
 	kfree(netdev->tx_fqs);
 	kfree(netdev->rx_fq);
 }
@@ -1337,7 +1342,7 @@ static int dpaa2_netdev_probe(struct fsl_mc_device *mdev)
 		goto err;
 	}
 
-	if (!(ndev = dummy_netdev_add(sizeof(*netdev), 1))) {
+	if (!(ndev = dummy_netdev_add(sizeof(*netdev), use_tx_conf ? 1 : nr_cpu_ids))) {
 		dev_err(&mdev->dev, "failed to alloc memory\n");
 		rc = -ENOMEM;
 		goto err;
@@ -1363,13 +1368,13 @@ static int dpaa2_netdev_probe(struct fsl_mc_device *mdev)
 		rc = -ENODEV;
 		goto err_rx_dpbp_init;
 	}
-#ifdef TX_DRAIN_BP
-	if (!(netdev->tx_drain_dpbp = dpaa2_dpbp_init(ndev, 0, 0))) {
+
+	if (!use_tx_conf && !(netdev->tx_drain_dpbp = dpaa2_dpbp_init(ndev, 0, 0))) {
 		netdev_err(ndev, "failed to init tx_drain_dpbp\n");
 		rc = -ENODEV;
 		goto err_tx_drain_dpbp_init;
 	}
-#endif
+
 	if (!(netdev->dpni = dpaa2_dpni_init(ndev, mdev))) {
 		netdev_err(ndev, "failed to init dpni\n");
 		rc = -ENODEV;
@@ -1400,10 +1405,8 @@ err_flow_init:
 err_set_dpbp:
 	dpaa2_dpni_clean(ndev, netdev->dpni);
 err_dpni_init:
-#ifdef TX_DRAIN_BP
 	dpaa2_dpbp_clean(ndev, netdev->tx_drain_dpbp);
 err_tx_drain_dpbp_init:
-#endif
 	dpaa2_dpbp_clean(ndev, netdev->rx_dpbp);
 err_rx_dpbp_init:
 	dpaa2_dpcon_clean(ndev, netdev->dpcon);
@@ -1438,9 +1441,11 @@ static int dpaa2_netdev_remove(struct fsl_mc_device *mdev)
 	dpaa2_netdev_fqs_clean(netdev);
 
 	dpaa2_dpni_clean(ndev, netdev->dpni);
-#ifdef TX_DRAIN_BP
-	dpaa2_dpbp_clean(ndev, netdev->tx_drain_dpbp);
-#endif
+
+	if (!use_tx_conf) {
+		dpaa2_dpbp_clean(ndev, netdev->tx_drain_dpbp);
+	}
+
 	dpaa2_dpbp_clean(ndev, netdev->rx_dpbp);
 
 	dpaa2_dpcon_clean(ndev, netdev->dpcon);
