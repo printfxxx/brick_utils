@@ -9,7 +9,7 @@ These are key features of it:
 - Realtime measure Tx/Rx throughput.
 - Flow control support.
 - Load/Save tx frames from pcap file.
-- Optimized driver for NXP DPAA device.
+- Optimized driver for NXP DPAA and DPAA2 device.
 
 === HOW TO BUILD ===
 1. Ensure ncurses or ncursesw already installed in your OS.
@@ -70,8 +70,10 @@ burst_sz	- Specify the size for each Tx burst. It will try keep same interval
 		  time for each burst.
 
 === USE OPTIMIZED DRIVER ===
-Now only NXP DPAA device supported. For use optimized driver, you should configure
-these setting in dts:
+Now only NXP DPAA and DPAA2 device supported. Use optimized driver will get better performance than generic linux driver.
+
+* DPAA
+You need configure these setting in dts:
 bp7: buffer-pool@7 {
 	compatible = "fsl,p4080-bpool", "fsl,bpool";
 	fsl,bpid = <7>;
@@ -89,6 +91,10 @@ ethernet@0 {
 
 After insert optimized DPAA driver, you will see the netdev:
 $ insmod sb_dpaa.ko
+
+* DPAA2
+Download "dynamic_dpl.sh" to your board, execute command "dynamic_dpl.sh <DPMAC.x>". It will create DPRC and all objects that need.
+$ insmod sb_dpaa2.ko
 
 === EXAMPLE ===
 You can see some examples under "simplebits/example/"
