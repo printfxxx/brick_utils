@@ -33,6 +33,8 @@ static struct task_struct *stats_th;
 module_param_named(devs, netdev_filter, charp, S_IRUGO);
 MODULE_PARM_DESC(devs, "Net device filter");
 
+static void netdev_update_stats(netdev_t *netdev, int64_t ns);
+
 static int netdev_hook_xmit(struct sk_buff *skb, struct net_device *ndev)
 {
 	notrace_dev_kfree_skb(skb);
@@ -246,11 +248,15 @@ static int netdev_clear(netdev_t *netdev)
 
 	rc = worker_op_post(&op);
 
+	raw_write_seqcount_begin(&netdev->stats_seq);
 	netdev->tx_pkts = netdev->tx_bytes = 0;
 	netdev->rx_pkts = netdev->rx_bytes = 0;
+	netdev->tx_pkts_prev = netdev->tx_bytes_prev = 0;
+	netdev->rx_pkts_prev = netdev->rx_bytes_prev = 0;
 	netdev->tx_pps_rt = netdev->tx_Bps_rt = netdev->tx_bps_rt = 0;
 	netdev->rx_pps_rt = netdev->rx_Bps_rt = netdev->rx_bps_rt = 0;
 	netdev->time_start = netdev->time_stop = netdev->time_prev = ktime_get();
+	raw_write_seqcount_end(&netdev->stats_seq);
 
 	mutex_unlock(&netdev->lock);
 
@@ -426,6 +432,16 @@ static int netdev_cmd_start(proto_handle_t *handle, proto_rxd_t *rxd, unsigned l
 		goto err;
 	}
 
+	netdev_update_stats(netdev, S64_MAX);
+	raw_write_seqcount_begin(&netdev->stats_seq);
+	netdev->tx_pkts_prev = netdev->tx_pkts;
+	netdev->tx_bytes_prev = netdev->tx_bytes;
+	netdev->rx_pkts_prev = netdev->rx_pkts;
+	netdev->rx_bytes_prev = netdev->rx_bytes;
+	netdev->tx_pkts = netdev->tx_bytes = 0;
+	netdev->rx_pkts = netdev->rx_bytes = 0;
+	raw_write_seqcount_end(&netdev->stats_seq);
+
 	op.opcode = WORKER_OP_START | WORKER_OP_F_PARALLEL;
 	get_worker_cpumask(&op.cpumask);
 	op.args[0] = netdev;
@@ -437,6 +453,7 @@ static int netdev_cmd_start(proto_handle_t *handle, proto_rxd_t *rxd, unsigned l
 
 	netdev->time_start = ktime_get();
 	netdev->start = true;
+	netdev_update_stats(netdev, S64_MAX);
 
 	mutex_unlock(&netdev->lock);
 	mutex_unlock(&netdev_list_lock);
@@ -490,6 +507,7 @@ static int netdev_cmd_stop(proto_handle_t *handle, proto_rxd_t *rxd, unsigned lo
 
 	netdev->time_stop = ktime_get();
 	netdev->start = false;
+	netdev_update_stats(netdev, S64_MAX);
 ok:
 	mutex_unlock(&netdev->lock);
 	mutex_unlock(&netdev_list_lock);

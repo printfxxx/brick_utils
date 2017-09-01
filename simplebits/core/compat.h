@@ -39,4 +39,8 @@ static inline bool netif_xmit_frozen_or_stopped(const struct netdev_queue *dev_q
 #define U64_MAX		((u64)(~0ULL))
 #endif
 
+#ifndef S64_MAX
+#define S64_MAX		((s64)(U64_MAX >> 1))
+#endif
+
 #endif	/* _COMPAT_H_ */
