@@ -42,7 +42,7 @@ typedef struct netdev_pcpu {
 } netdev_pcpu_t;
 
 typedef struct netdev_priv_ops {
-	void (*netdev_poll)(struct net_device *, unsigned int, bool);
+	void (*netdev_poll)(struct net_device *, unsigned int, unsigned int, bool);
 } netdev_priv_ops_t;
 
 typedef struct netdev {

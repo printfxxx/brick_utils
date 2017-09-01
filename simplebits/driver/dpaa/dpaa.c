@@ -278,41 +278,51 @@ static struct net_device_ops dpaa_netdev_ops = {
 	.ndo_start_xmit = dpaa_start_xmit,
 };
 
-static void dpaa_netdev_poll(struct net_device *ndev, unsigned int limit, bool stride)
+static void dpaa_netdev_poll(struct net_device *ndev, unsigned int tx_budget, unsigned int rx_budget, bool stride)
 {
 	int i, ret;
+	bool fold;
 	dma_addr_t baddr;
 	dpaa_ndev_t *netdev;
+	unsigned int n;
 	struct device *dev;
 	struct sk_buff *skb, **skbh;
 	struct bm_buffer bufs[8];
 
-	qman_poll_dqrr(limit);
+	qman_poll_dqrr(rx_budget);
 
-	if (use_tx_conf) {
+	if (use_tx_conf || !tx_budget) {
 		goto end;
 	}
 
 	netdev = netdev_priv(ndev);
 	dev = ndev->dev.parent;
-	ret = 8;
-	do {
-		if (ret == 8) {
-			ret = bman_acquire(netdev->tx_drain_bp, bufs, 8, 0);
+	n = min(tx_budget, 8u);
+	fold = false;
+	while (tx_budget) {
+		n = min(tx_budget, n);
+		n = fold ? n / 2 : n;
+		if (!n) {
+			break;
 		}
-		if (ret == 8) {
-			stride = true;
-		} else if (!stride) {
-			ret = bman_acquire(netdev->tx_drain_bp, bufs, 1, 0);
+		if ((ret = bman_acquire(netdev->tx_drain_bp, bufs, n, 0)) != n) {
+			BUG_ON(ret > 0);
+			if (stride) {
+				break;
+			} else {
+				fold = true;
+				continue;
+			}
 		}
-		for (i = 0; i < ret; i++) {
+		for (i = 0; i < n; i++) {
 			baddr = bm_buffer_get64(&bufs[i]);
 			skbh = phys_to_virt(dma_to_phys(dev, baddr));
 			skbh--;
 			skb = *skbh;
 			dev_kfree_skb(skb);
 		}
-	} while (ret > 0);
+		tx_budget -= n;
+	}
 end:
 	return;
 }
@@ -370,7 +380,7 @@ static struct bman_pool *dpaa_bpool_init(struct net_device *ndev, uint32_t bpid,
 	dev = ndev->dev.parent;
 	for (cnt = 0; cnt < nr;) {
 		ret = nr - cnt;
-		ret =min(ret, 8);
+		ret = min(ret, 8);
 		memset(bufs, 0, sizeof(bufs[0]) * ret);
 		for (i = 0; i < ret; i++) {
 			if (!(skb = __netdev_alloc_skb(ndev, sz, GFP_KERNEL | GFP_DMA))

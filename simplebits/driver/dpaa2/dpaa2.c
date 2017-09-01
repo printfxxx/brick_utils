@@ -666,43 +666,53 @@ static void qbman_poll_dqrr(struct qbman_swp *swp, unsigned int limit)
 	}
 }
 
-static void dpaa2_netdev_poll(struct net_device *ndev, unsigned int limit, bool stride)
+static void dpaa2_netdev_poll(struct net_device *ndev, unsigned int tx_budget, unsigned int rx_budget, bool stride)
 {
 	int i, ret;
+	bool fold;
 	uint64_t bufs[7];
 	dma_addr_t baddr;
 	dpaa2_ndev_t *netdev;
+	unsigned int n;
 	struct device *dev;
 	struct sk_buff *skb, **skbh;
 	struct qbman_swp *swp;
 
 	swp = this_cpu_ptr(&cpu_dpaa2_io_infos)->swp;
-	qbman_poll_dqrr(swp, limit);
+	qbman_poll_dqrr(swp, rx_budget);
 
-	if (use_tx_conf) {
+	if (use_tx_conf || !tx_budget) {
 		goto end;
 	}
 
 	netdev = netdev_priv(ndev);
 	dev = ndev->dev.parent;
-	ret = 7;
-	do {
-		if (ret == 7) {
-			ret = qbman_swp_acquire(swp, netdev->tx_drain_dpbp->attr.bpid, bufs, 7);
+	n = min(tx_budget, 7u);
+	fold = false;
+	while (tx_budget) {
+		n = min(tx_budget, n);
+		n = fold ? n / 2 : n;
+		if (!n) {
+			break;
 		}
-		if (ret == 7) {
-			stride = true;
-		} else if (!stride) {
-			ret = qbman_swp_acquire(swp, netdev->tx_drain_dpbp->attr.bpid, bufs, 1);
+		if ((ret = qbman_swp_acquire(swp, netdev->tx_drain_dpbp->attr.bpid, bufs, n)) != n) {
+			BUG_ON(ret > 0);
+			if (stride) {
+				break;
+			} else {
+				fold = true;
+				continue;
+			}
 		}
-		for (i = 0; i < ret; i++) {
+		for (i = 0; i < n; i++) {
 			baddr = bufs[i];
 			skbh = phys_to_virt(dma_to_phys(dev, baddr));
 			skbh--;
 			skb = *skbh;
 			dev_kfree_skb(skb);
 		}
-	} while (ret > 0);
+		tx_budget -= n;
+	}
 end:
 	return;
 }

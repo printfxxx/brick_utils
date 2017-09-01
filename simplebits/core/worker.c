@@ -49,14 +49,14 @@ MODULE_PARM_DESC(cpus, "Worker cpus list");
 
 static void traffic_poll(netdev_pcpu_t *pcpu, unsigned int limit);
 
-static void netdev_poll(netdev_t *netdev, unsigned int limit, plat_time_t pt_last_tx)
+static void netdev_poll(netdev_t *netdev, unsigned int tx_budget, unsigned int rx_budget, plat_time_t pt_last_tx)
 {
 	bool stride;
 	netdev_priv_ops_t *priv_ops;
 
 	if ((priv_ops = netdev->priv_ops)) {
 		stride = !!((plat_time_get() - pt_last_tx) < pt_stride_timeout);
-		priv_ops->netdev_poll(netdev->ndev, limit, stride);
+		priv_ops->netdev_poll(netdev->ndev, tx_budget, rx_budget, stride);
 	}
 }
 
@@ -237,7 +237,7 @@ static int worker_op_handler_stop(worker_t *worker, worker_op_t *op)
 
 	pcpu->pkt_remain = 0;
 	while (pcpu->tx_used) {
-		netdev_poll(netdev, pcpu->tx_used, 0);
+		netdev_poll(netdev, pcpu->tx_used, pcpu->budget, false);
 		traffic_poll(pcpu, pcpu->tx_used);
 	}
 	pcpu->start = false;
@@ -1241,7 +1241,7 @@ static int worker_fn(void *arg)
 			break;
 		}
 		list_for_each_entry_safe(pcpu, pcpu_tmp, &worker->netdev_pcpu_list, node) {
-			netdev_poll(pcpu->netdev, pcpu->budget, pcpu->pt_last_tx);
+			netdev_poll(pcpu->netdev, pcpu->tx_used, pcpu->budget, pcpu->pt_last_tx);
 			if (!pcpu->start) {
 				continue;
 			}
