@@ -21,6 +21,7 @@
 
 #include "netdev.h"
 #include "worker.h"
+#include "compat.h"
 #include "mc.h"
 #include "mc-sys.h"
 #include "mc-private.h"
@@ -1090,7 +1091,7 @@ static void dpaa2_recycle_skb(struct qbman_swp *swp, struct net_device *ndev,
 	struct sk_buff **skbh;
 	struct qbman_release_desc rd;
 
-	BUG_ON(atomic_read(&skb->users) != 1);
+	BUG_ON(skb_refs_op(read, &skb->users) != 1);
 
 	skb->data = skb->head + NET_SKB_PAD;
 	skb_reset_tail_pointer(skb);

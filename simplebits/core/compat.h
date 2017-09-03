@@ -35,6 +35,12 @@ static inline bool netif_xmit_frozen_or_stopped(const struct netdev_queue *dev_q
 #define raw_write_seqcount_end(s)	write_seqcount_end(s)
 #endif
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 13, 0)
+#define skb_refs_op(type, ...)		atomic_##type(__VA_ARGS__)
+#else
+#define skb_refs_op(type, ...)		refcount_##type(__VA_ARGS__)
+#endif
+
 #ifndef U64_MAX
 #define U64_MAX		((u64)(~0ULL))
 #endif

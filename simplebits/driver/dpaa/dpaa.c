@@ -24,6 +24,7 @@
 
 #include "netdev.h"
 #include "worker.h"
+#include "compat.h"
 #include "qman.h"
 #include "bman.h"
 #include "dpaa_eth.h"
@@ -627,7 +628,7 @@ static void dpaa_recycle_skb(struct net_device *ndev, struct sk_buff *skb, dma_a
 	struct sk_buff **skbh;
 	struct bm_buffer buf = {};
 
-	BUG_ON(atomic_read(&skb->users) != 1);
+	BUG_ON(skb_refs_op(read, &skb->users) != 1);
 
 	skb->data = skb->head + NET_SKB_PAD;
 	skb_reset_tail_pointer(skb);

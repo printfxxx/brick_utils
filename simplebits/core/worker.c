@@ -1135,7 +1135,7 @@ static void traffic_poll(netdev_pcpu_t *pcpu, unsigned int limit)
 	while (tx_used && limit) {
 		skb = pcpu->pool[pcpu->tx_tail];
 		user = &pcpu->user[pcpu->tx_tail];
-		if (unlikely(*user < atomic_read(&skb->users))) {
+		if (unlikely(*user < skb_refs_op(read, &skb->users))) {
 			break;
 		}
 		*user -= 1;
@@ -1200,7 +1200,7 @@ static void traffic_run(netdev_pcpu_t *pcpu)
 		skb_get(skb);
 		if (netif_xmit_frozen_or_stopped(tx_queue)
 		||  (*xmit)(skb, ndev) != NETDEV_TX_OK) {
-			atomic_dec(&skb->users);
+			skb_refs_op(dec, &skb->users);
 			break;
 		}
 		*user += 1;
